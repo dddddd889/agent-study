@@ -1,0 +1,86 @@
+import type { LLM, Message } from "./types";
+
+export interface AnthropicLLMOptions {
+  apiKey?: string;
+  authToken?: string;
+  baseUrl?: string;
+  model?: string;
+  maxTokens?: number;
+}
+
+// 基于 Anthropic Messages API 的 LLM 实现。
+// 只用了原生 fetch，没有额外 SDK 依赖，方便看清请求/响应结构。
+//
+// 鉴权两种方式（任选其一）：
+//   1) x-api-key            <- ANTHROPIC_API_KEY，连官方 api.anthropic.com
+//   2) Authorization Bearer <- ECHO_TECH_ANTHROPIC_AUTH_TOKEN，连自建/代理网关
+// baseUrl 可用 ECHO_TECH_ANTHROPIC_BASE_URL 覆盖，指向代理地址。
+export class AnthropicLLM implements LLM {
+  private apiKey?: string;
+  private authToken?: string;
+  private baseUrl: string;
+  private model: string;
+  private maxTokens: number;
+
+  constructor(opts: AnthropicLLMOptions = {}) {
+    this.authToken = opts.authToken ?? process.env.ECHO_TECH_ANTHROPIC_AUTH_TOKEN;
+    this.apiKey = opts.apiKey ?? process.env.ANTHROPIC_API_KEY;
+
+    if (!this.authToken && !this.apiKey) {
+      throw new Error(
+        "缺少鉴权：请配置 ECHO_TECH_ANTHROPIC_AUTH_TOKEN 或 ANTHROPIC_API_KEY",
+      );
+    }
+
+    const base =
+      opts.baseUrl ??
+      process.env.ECHO_TECH_ANTHROPIC_BASE_URL ??
+      "https://api.anthropic.com";
+    // 去掉末尾斜杠，避免拼出双斜杠。
+    this.baseUrl = base.replace(/\/+$/, "");
+    this.model = opts.model ?? process.env.ANTHROPIC_MODEL ?? "claude-sonnet-4-6";
+    this.maxTokens = opts.maxTokens ?? 1024;
+  }
+
+  private buildHeaders(): Record<string, string> {
+    const headers: Record<string, string> = {
+      "content-type": "application/json",
+      "anthropic-version": "2023-06-01",
+    };
+    // 优先使用 bearer token（代理网关），否则回退到官方 x-api-key。
+    if (this.authToken) {
+      headers["authorization"] = `Bearer ${this.authToken}`;
+    } else if (this.apiKey) {
+      headers["x-api-key"] = this.apiKey;
+    }
+    return headers;
+  }
+
+  async complete(messages: Message[], system?: string): Promise<string> {
+    const res = await fetch(`${this.baseUrl}/v1/messages`, {
+      method: "POST",
+      headers: this.buildHeaders(),
+      body: JSON.stringify({
+        model: this.model,
+        max_tokens: this.maxTokens,
+        ...(system ? { system } : {}),
+        messages: messages.map((m) => ({ role: m.role, content: m.content })),
+      }),
+    });
+
+    if (!res.ok) {
+      const detail = await res.text();
+      throw new Error(`Anthropic API 错误 ${res.status}: ${detail}`);
+    }
+
+    const data = (await res.json()) as {
+      content: Array<{ type: string; text?: string }>;
+    };
+
+    // 响应 content 是一个数组，把所有 text 块拼起来即可。
+    return data.content
+      .filter((b) => b.type === "text" && typeof b.text === "string")
+      .map((b) => b.text)
+      .join("");
+  }
+}

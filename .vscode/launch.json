@@ -1,0 +1,43 @@
+{
+  // 调试 Bun 程序需要安装扩展：oven.bun-vscode（见 extensions.json）
+  // 断点：在 src/*.ts 或 tests/*.ts 行号左侧点一下即可。
+  // 鉴权环境变量从 .env 读取（envFile），请先把 .env.example 复制为 .env。
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "type": "bun",
+      "request": "launch",
+      "name": "Debug: CLI 对话",
+      "program": "src/cli.ts",
+      "cwd": "${workspaceFolder}",
+      "envFile": "${workspaceFolder}/.env",
+      "stopOnEntry": false,
+      "watchMode": false,
+      "internalConsoleOptions": "neverOpen"
+    },
+    {
+      "type": "bun",
+      "request": "launch",
+      "name": "Debug: 当前测试文件",
+      "program": "${file}",
+      "runtimeArgs": ["test"],
+      "cwd": "${workspaceFolder}",
+      "envFile": "${workspaceFolder}/.env",
+      "stopOnEntry": false,
+      "watchMode": false,
+      "internalConsoleOptions": "neverOpen"
+    },
+    {
+      "type": "bun",
+      "request": "launch",
+      "name": "Debug: 全部测试",
+      "program": ".",
+      "runtimeArgs": ["test"],
+      "cwd": "${workspaceFolder}",
+      "envFile": "${workspaceFolder}/.env",
+      "stopOnEntry": false,
+      "watchMode": false,
+      "internalConsoleOptions": "neverOpen"
+    }
+  ]
+}

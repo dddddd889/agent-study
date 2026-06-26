@@ -1,0 +1,16 @@
+{
+  "name": "agent-study",
+  "version": "0.1.0",
+  "description": "从最简对话循环开始，逐步构建完善的 agent 服务",
+  "type": "module",
+  "module": "src/cli.ts",
+  "scripts": {
+    "start": "bun run src/cli.ts",
+    "test": "bun test",
+    "typecheck": "tsc --noEmit"
+  },
+  "devDependencies": {
+    "@types/bun": "latest",
+    "typescript": "^5"
+  }
+}
