@@ -1,10 +1,11 @@
 # agent-study · 第 1 步：最简对话循环
 
-> 📈 **本仓库按步骤演进。** 当前代码已实现到 **第 4 步：上下文管理**。步骤文档：
+> 📈 **本仓库按步骤演进。** 当前代码已实现到 **第 5 步：请求重试 + 指数退避**。步骤文档：
 >
 > - 第 2 步 · 工具调用循环 → [docs/02-tool-calling-loop.md](docs/02-tool-calling-loop.md)
 > - 第 3 步 · 常用内置工具（文件 / HTTP / Shell）→ [docs/03-builtin-tools.md](docs/03-builtin-tools.md)
 > - 第 4 步 · 上下文管理（token 估算 + 整轮截断）→ [docs/04-context-management.md](docs/04-context-management.md)
+> - 第 5 步 · 请求重试 + 指数退避（LLM 层健壮性）→ [docs/05-retry-backoff.md](docs/05-retry-backoff.md)
 >
 > 本文件介绍的是**第 1 步内核**（最简对话循环）——它仍是理解后续步骤的基础。
 

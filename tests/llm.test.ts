@@ -121,13 +121,108 @@ describe("AnthropicLLM 请求构造", () => {
     ]);
   });
 
-  test("非 2xx 响应抛错", async () => {
+  test("非 2xx 响应抛错（关闭重试）", async () => {
     globalThis.fetch = (async () =>
       new Response("boom", { status: 500 })) as unknown as typeof fetch;
-    const llm = new AnthropicLLM({ authToken: "t" });
+    const llm = new AnthropicLLM({ authToken: "t", maxRetries: 0 });
 
     await expect(
       llm.complete([{ role: "user", content: "x" }]),
     ).rejects.toThrow(/500/);
+  });
+});
+
+describe("AnthropicLLM 重试与退避", () => {
+  // 返回一个 fetch 替身：按 makers 依次调用，每次产出一个全新的 Response
+  // （Response body 只能读一次，不能复用同一个对象）。maker 抛异常即模拟网络错误。
+  // 最后一个 maker 会被重复使用。retryBaseMs: 0 → 退避不真实等待，测试瞬间完成。
+  function fetchSeq(makers: Array<() => Response>) {
+    let i = 0;
+    const calls = { count: 0 };
+    globalThis.fetch = (async () => {
+      calls.count++;
+      const m = makers[Math.min(i, makers.length - 1)]!;
+      i++;
+      return m();
+    }) as unknown as typeof fetch;
+    return calls;
+  }
+
+  const ok = () =>
+    new Response(
+      JSON.stringify({ stop_reason: "end_turn", content: [{ type: "text", text: "ok" }] }),
+      { status: 200 },
+    );
+
+  test("502 后成功：重试一次拿到结果", async () => {
+    const calls = fetchSeq([() => new Response("bad gateway", { status: 502 }), ok]);
+    const llm = new AnthropicLLM({ authToken: "t", retryBaseMs: 0 });
+
+    const res = await llm.complete([{ role: "user", content: "x" }]);
+    expect(res.content).toEqual([{ type: "text", text: "ok" }]);
+    expect(calls.count).toBe(2); // 1 次失败 + 1 次重试成功
+  });
+
+  test("4xx 不重试：立刻抛错，只请求一次", async () => {
+    const calls = fetchSeq([() => new Response("bad request", { status: 400 })]);
+    const llm = new AnthropicLLM({ authToken: "t", retryBaseMs: 0 });
+
+    await expect(
+      llm.complete([{ role: "user", content: "x" }]),
+    ).rejects.toThrow(/400/);
+    expect(calls.count).toBe(1);
+  });
+
+  test("一直 5xx：耗尽重试后抛错，共 1 + maxRetries 次", async () => {
+    const calls = fetchSeq([() => new Response("err", { status: 503 })]);
+    const llm = new AnthropicLLM({ authToken: "t", retryBaseMs: 0, maxRetries: 3 });
+
+    await expect(
+      llm.complete([{ role: "user", content: "x" }]),
+    ).rejects.toThrow(/503/);
+    expect(calls.count).toBe(4); // 初始 1 + 重试 3
+  });
+
+  test("网络异常也重试", async () => {
+    const calls = fetchSeq([
+      () => {
+        throw new Error("ECONNRESET");
+      },
+      ok,
+    ]);
+    const llm = new AnthropicLLM({ authToken: "t", retryBaseMs: 0 });
+
+    const res = await llm.complete([{ role: "user", content: "x" }]);
+    expect(res.stopReason).toBe("end_turn");
+    expect(calls.count).toBe(2);
+  });
+
+  test("onRetry 回调被触发，带状态码", async () => {
+    fetchSeq([() => new Response("x", { status: 429 }), ok]);
+    const events: Array<{ attempt: number; status?: number }> = [];
+    const llm = new AnthropicLLM({
+      authToken: "t",
+      retryBaseMs: 0,
+      onRetry: (info) => events.push({ attempt: info.attempt, status: info.status }),
+    });
+
+    await llm.complete([{ role: "user", content: "x" }]);
+    expect(events).toEqual([{ attempt: 1, status: 429 }]);
+  });
+
+  test("尊重 Retry-After 头（秒数）", async () => {
+    fetchSeq([
+      () => new Response("x", { status: 429, headers: { "retry-after": "0" } }),
+      ok,
+    ]);
+    let delay = -1;
+    const llm = new AnthropicLLM({
+      authToken: "t",
+      retryBaseMs: 5000, // 若不尊重 Retry-After，退避会算出 ~5s
+      onRetry: (info) => (delay = info.delayMs),
+    });
+
+    await llm.complete([{ role: "user", content: "x" }]);
+    expect(delay).toBe(0); // 用了 Retry-After: 0，而非指数退避
   });
 });

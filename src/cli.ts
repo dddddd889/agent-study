@@ -8,7 +8,14 @@ import { defaultTools } from "./tools";
 // 用 node:readline 而非 `for await (const line of console)`，
 // 后者是 Bun 专有 API，在 Node 下不生效。readline 在 Node / Bun 都可用。
 async function main() {
-  const llm = new AnthropicLLM();
+  const llm = new AnthropicLLM({
+    // 网络/网关抖动（502、429、5xx）时自动重试，并把过程打印出来。
+    onRetry: ({ attempt, maxRetries, status, error, delayMs }) =>
+      console.log(
+        `  · 请求失败（${status ?? error?.message ?? "网络错误"}），` +
+          `${(delayMs / 1000).toFixed(1)}s 后重试 (${attempt}/${maxRetries})`,
+      ),
+  });
   const agent = new Agent(llm, {
     system:
       "你是一个简洁、友好的中文助手。可以使用工具来获取实时信息、读写文件、发起 HTTP 请求或执行 shell 命令。",
