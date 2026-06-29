@@ -1,3 +1,4 @@
+import { countTurns, estimateTokens, truncateHistory } from "./context";
 import type {
   ContentBlock,
   LLM,
@@ -13,12 +14,21 @@ export interface AgentOptions {
   tools?: Tool[];
   // 工具循环的最大步数，防止模型反复要工具陷入死循环。默认 10。
   maxSteps?: number;
+  // 上下文管理：历史估算 token 超过此值时，按整轮截断最旧的对话。默认 100000。
+  // 想观察截断效果，把它调小（如 500）即可。
+  maxContextTokens?: number;
   // 可选事件回调，便于 CLI 展示「正在调用工具 / 工具结果」等过程。
   onToolCall?: (call: { name: string; input: Record<string, unknown> }) => void;
   onToolResult?: (result: {
     name: string;
     content: string;
     isError: boolean;
+  }) => void;
+  // 上下文被截断时触发，便于 CLI 显示「agent 遗忘了旧对话」。
+  onTruncate?: (info: {
+    droppedTurns: number;
+    beforeTokens: number;
+    afterTokens: number;
   }) => void;
 }
 
@@ -32,8 +42,10 @@ export class Agent {
   private system?: string;
   private tools: Tool[];
   private maxSteps: number;
+  private maxContextTokens: number;
   private onToolCall?: AgentOptions["onToolCall"];
   private onToolResult?: AgentOptions["onToolResult"];
+  private onTruncate?: AgentOptions["onTruncate"];
   private history: Message[] = [];
 
   constructor(llm: LLM, opts: AgentOptions = {}) {
@@ -41,8 +53,10 @@ export class Agent {
     this.system = opts.system;
     this.tools = opts.tools ?? [];
     this.maxSteps = opts.maxSteps ?? 10;
+    this.maxContextTokens = opts.maxContextTokens ?? 100000;
     this.onToolCall = opts.onToolCall;
     this.onToolResult = opts.onToolResult;
+    this.onTruncate = opts.onTruncate;
   }
 
   // 一轮对话（内部可能包含多步工具调用），返回最终的文本回复。
@@ -51,6 +65,10 @@ export class Agent {
 
     // agent 循环：每次迭代 = 调一次模型。
     for (let step = 0; step < this.maxSteps; step++) {
+      // 调模型前先做上下文管理：历史过长就按整轮截断最旧的对话。
+      // 放在循环顶部，是因为工具循环里 history 还会增长，每轮都校一次最稳。
+      this.compactHistory();
+
       const res = await this.llm.complete(this.history, {
         system: this.system,
         tools: this.tools,
@@ -99,6 +117,26 @@ export class Agent {
     }
 
     throw new Error(`超过最大工具调用步数（${this.maxSteps}），可能陷入循环`);
+  }
+
+  // 上下文管理：历史估算 token 超过 maxContextTokens 时，按整轮截断最旧的对话。
+  // TODO: 目前是「就地遗忘」—— this.history 被真删。如需保留完整历史，可改为
+  //       保留完整历史、仅在发送时用截断副本，或把丢弃的旧轮归档到别处。
+  // TODO: 截断之外还可做「摘要压缩」—— 把旧轮再调一次 LLM 浓缩成一段摘要塞回。
+  private compactHistory(): void {
+    const beforeTokens = estimateTokens(this.history);
+    if (beforeTokens <= this.maxContextTokens) return;
+
+    const truncated = truncateHistory(this.history, this.maxContextTokens);
+    if (truncated.length === this.history.length) return; // 已是最近 1 轮，砍不动了
+
+    const droppedTurns = countTurns(this.history) - countTurns(truncated);
+    this.history = truncated;
+    this.onTruncate?.({
+      droppedTurns,
+      beforeTokens,
+      afterTokens: estimateTokens(truncated),
+    });
   }
 
   // 执行单个工具调用，永远返回文本结果；出错也转成 is_error 结果块，

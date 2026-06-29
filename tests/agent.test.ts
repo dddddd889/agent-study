@@ -227,6 +227,29 @@ describe("Agent 工具调用循环", () => {
     expect(llm.calls).toHaveLength(1);
   });
 
+  test("历史超过 maxContextTokens 时按轮截断，并触发 onTruncate", async () => {
+    const llm = new FakeLLM();
+    const events: Array<{ droppedTurns: number }> = [];
+    const agent = new Agent(llm, {
+      maxContextTokens: 30, // 很小，强制截断
+      onTruncate: (info) => events.push(info),
+    });
+
+    for (let i = 1; i <= 6; i++) {
+      await agent.send(`这是第${i}句话，用来把上下文撑长一点`);
+    }
+
+    const h = agent.getHistory();
+    expect(h.length).toBeLessThan(12); // 没有无限增长
+    expect(h[0]!.role).toBe("user");
+    expect(typeof h[0]!.content).toBe("string"); // 首条是真实用户输入
+    expect(events.length).toBeGreaterThan(0); // 至少截断过一次
+
+    // 最近一次调用 LLM 时，收到的就是截断后的短历史。
+    const lastCall = llm.calls[llm.calls.length - 1]!;
+    expect(lastCall.messages.length).toBeLessThan(12);
+  });
+
   test("onToolCall / onToolResult 回调会被触发", async () => {
     const { tool } = makeAddTool();
     let step = 0;

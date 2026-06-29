@@ -20,6 +20,11 @@ async function main() {
       console.log(`  · 调用工具 ${name}(${JSON.stringify(input)})`),
     onToolResult: ({ name, content, isError }) =>
       console.log(`  · ${name} ${isError ? "出错" : "结果"}：${content}`),
+    // 上下文超限时打印一行，让“agent 遗忘了旧对话”这件事可见。
+    onTruncate: ({ droppedTurns, beforeTokens, afterTokens }) =>
+      console.log(
+        `  · 上下文超限，已遗忘 ${droppedTurns} 轮旧对话（~${beforeTokens} → ~${afterTokens} token）`,
+      ),
   });
 
   console.log("简易对话 Agent 已启动。输入 /exit 退出，/reset 重置对话。\n");
