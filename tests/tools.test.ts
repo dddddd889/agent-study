@@ -3,6 +3,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
+  htmlToMarkdown,
   httpRequestTool,
   readFileTool,
   shellTool,
@@ -85,6 +86,64 @@ describe("http_request 工具", () => {
       httpRequestTool.run({ url: "http://example.com" }, { signal: ac.signal }),
     ).rejects.toThrow();
     expect(seenSignal).toBe(ac.signal); // 确实把 signal 传给了 fetch
+  });
+});
+
+describe("htmlToMarkdown", () => {
+  test("标题 / 链接转 markdown", () => {
+    const md = htmlToMarkdown(
+      '<h1>标题</h1><p>看 <a href="https://x.com">这里</a></p>',
+    );
+    expect(md).toContain("# 标题");
+    expect(md).toContain("[这里](https://x.com)");
+  });
+
+  test("删掉 script / style，解码实体", () => {
+    const md = htmlToMarkdown(
+      "<style>.a{}</style><script>evil()</script><p>a &amp; b &lt;c&gt;</p>",
+    );
+    expect(md).not.toContain("evil");
+    expect(md).not.toContain(".a{}");
+    expect(md).toContain("a & b <c>");
+  });
+
+  test("列表与加粗", () => {
+    const md = htmlToMarkdown("<ul><li>一</li><li>二</li></ul><b>粗</b>");
+    expect(md).toContain("- 一");
+    expect(md).toContain("- 二");
+    expect(md).toContain("**粗**");
+  });
+});
+
+describe("http_request 按类型转换", () => {
+  const realFetch = globalThis.fetch;
+  afterEach(() => {
+    globalThis.fetch = realFetch;
+  });
+
+  test("text/html → 转成 Markdown，带标记、不含原始标签", async () => {
+    globalThis.fetch = (async () =>
+      new Response("<html><body><h1>你好</h1><script>x()</script></body></html>", {
+        status: 200,
+        headers: { "content-type": "text/html; charset=utf-8" },
+      })) as unknown as typeof fetch;
+
+    const out = await httpRequestTool.run({ url: "http://example.com" });
+    expect(out).toContain("已转为 Markdown");
+    expect(out).toContain("# 你好");
+    expect(out).not.toContain("<h1>");
+    expect(out).not.toContain("x()"); // script 被删
+  });
+
+  test("application/json → 原样返回，不转换、不加标记", async () => {
+    globalThis.fetch = (async () =>
+      new Response('{"a":1}', {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      })) as unknown as typeof fetch;
+
+    const out = await httpRequestTool.run({ url: "http://example.com/api" });
+    expect(out).toBe('HTTP 200\n\n{"a":1}');
   });
 });
 

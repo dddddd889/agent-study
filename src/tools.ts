@@ -14,6 +14,72 @@ function truncate(text: string): string {
     : text;
 }
 
+// 剥掉所有 HTML 标签。
+function stripTags(s: string): string {
+  return s.replace(/<[^>]+>/g, "");
+}
+
+// 解码常见 HTML 实体（在剥完标签后做，避免把 &lt; 误当成标签）。
+function decodeEntities(s: string): string {
+  const map: Record<string, string> = {
+    "&amp;": "&",
+    "&lt;": "<",
+    "&gt;": ">",
+    "&quot;": '"',
+    "&#39;": "'",
+    "&apos;": "'",
+    "&nbsp;": " ",
+  };
+  return s.replace(/&amp;|&lt;|&gt;|&quot;|&#39;|&apos;|&nbsp;/g, (m) => map[m] ?? m);
+}
+
+// 把 HTML 粗略转成 Markdown：删噪音 → 结构转 md → 剥标签 → 解码实体 → 压空白。
+// 极简实现，靠正则，对复杂/畸形页面会有瑕疵；目的是“砍掉网页噪音、省 token”。
+// TODO: 用 readability 提取正文（去导航/页脚/广告）；用 turndown 或 Bun HTMLRewriter
+//       做健壮解析；表格 / 图片等精细处理。
+export function htmlToMarkdown(html: string): string {
+  let s = html;
+  // 1. 删干净：注释、script、style、head —— 纯噪音。
+  s = s.replace(/<!--[\s\S]*?-->/g, "");
+  s = s.replace(/<(script|style|head)\b[^>]*>[\s\S]*?<\/\1>/gi, "");
+
+  // 2. 结构转 markdown。
+  s = s.replace(
+    /<h([1-6])\b[^>]*>([\s\S]*?)<\/h\1>/gi,
+    (_m, lv, inner) => `\n${"#".repeat(Number(lv))} ${stripTags(inner).trim()}\n`,
+  );
+  s = s.replace(
+    /<a\b[^>]*href=["']([^"']*)["'][^>]*>([\s\S]*?)<\/a>/gi,
+    (_m, href, inner) => {
+      const text = stripTags(inner).trim();
+      return text ? `[${text}](${href})` : "";
+    },
+  );
+  s = s.replace(
+    /<(strong|b)\b[^>]*>([\s\S]*?)<\/\1>/gi,
+    (_m, _t, inner) => `**${stripTags(inner).trim()}**`,
+  );
+  s = s.replace(
+    /<pre\b[^>]*>([\s\S]*?)<\/pre>/gi,
+    (_m, inner) => `\n\`\`\`\n${stripTags(inner).trim()}\n\`\`\`\n`,
+  );
+  s = s.replace(
+    /<code\b[^>]*>([\s\S]*?)<\/code>/gi,
+    (_m, inner) => `\`${stripTags(inner).trim()}\``,
+  );
+  s = s.replace(/<li\b[^>]*>([\s\S]*?)<\/li>/gi, (_m, inner) => `\n- ${stripTags(inner).trim()}`);
+  s = s.replace(/<\/(p|div)>/gi, "\n");
+  s = s.replace(/<br\s*\/?>/gi, "\n");
+
+  // 3. 剥掉其余所有标签。
+  s = stripTags(s);
+  // 4. 解码常见实体。
+  s = decodeEntities(s);
+  // 5. 压空白：行尾空白去掉，连续 3+ 空行压成 2。
+  s = s.replace(/[ \t]+\n/g, "\n").replace(/\n{3,}/g, "\n\n").trim();
+  return s;
+}
+
 // TODO: 工具变多后，把本文件按类别拆成 src/tools/ 目录（builtin / fs / http / shell）。
 
 // ============ 纯工具（无副作用）============
@@ -129,8 +195,14 @@ export const httpRequestTool: Tool = {
       body: input.body != null ? String(input.body) : undefined,
       signal: ctx?.signal,
     });
-    const text = await res.text();
-    return `HTTP ${res.status}\n\n${truncate(text)}`;
+    const raw = await res.text();
+
+    // 是 HTML 就转成 Markdown 再返回（更干净、更省 token）；其它类型原样返回。
+    // 先转后截：10k 额度装的是“干货 markdown”而非“半截 HTML”。
+    const isHtml = (res.headers.get("content-type") ?? "").includes("text/html");
+    const body = isHtml ? htmlToMarkdown(raw) : raw;
+    const label = isHtml ? " (已转为 Markdown)" : "";
+    return `HTTP ${res.status}${label}\n\n${truncate(body)}`;
   },
 };
 

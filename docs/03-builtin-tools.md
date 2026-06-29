@@ -11,6 +11,8 @@
 
 ## 四个新工具
 
+> 📌 **后续改动**:本文描述的是第 3 步的初始实现。`http_request` / `shell` 等工具在后续步骤有增强 —— 工具内部支持中断(signal)见 [docs/07](07-interrupt.md);`http_request` 自动把 HTML 转成 Markdown 见 [docs/08](08-http-html-to-markdown.md)。下面的表格保留初始形态、不再逐一回改。
+
 | 工具 | 入参 | 行为 | 关键取舍 |
 |---|---|---|---|
 | `read_file` | `{ path }` | 返回文件 UTF-8 文本 | 路径直接用；沙箱留 TODO |
