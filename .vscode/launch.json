@@ -5,15 +5,20 @@
   "version": "0.2.0",
   "configurations": [
     {
+      // 交互式 CLI 需要真正的 stdin（终端），但 bun 的 launch 调试走调试控制台、
+      // 没有可交互 stdin，一启动就读到 EOF 直接退出。所以这里改用「attach」：
+      //
+      //   1. 在「集成终端」里运行（终端有真正的 stdin，可以正常输入）：
+      //        bun --inspect-wait=ws://localhost:6499/cli run src/cli.ts
+      //      （想从第一行就断点，把 --inspect-wait 换成 --inspect-brk）
+      //   2. 选中本配置按 F5，调试器连上后程序开始执行，断点照常生效。
+      //
+      // 这样既能在终端里交互输入，又能在 src/*.ts 打断点。
       "type": "bun",
-      "request": "launch",
-      "name": "Debug: CLI 对话",
-      "program": "src/cli.ts",
-      "cwd": "${workspaceFolder}",
-      "envFile": "${workspaceFolder}/.env",
-      "stopOnEntry": false,
-      "watchMode": false,
-      "internalConsoleOptions": "neverOpen"
+      "request": "attach",
+      "name": "Attach: CLI 对话（交互）",
+      "url": "ws://localhost:6499/cli",
+      "stopOnEntry": false
     },
     {
       "type": "bun",
