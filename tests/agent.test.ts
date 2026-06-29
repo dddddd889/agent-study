@@ -212,6 +212,21 @@ describe("Agent 工具调用循环", () => {
     expect(llm.calls).toHaveLength(3);
   });
 
+  test("stop_reason 为 max_tokens 时抛出清晰错误，而非空转", async () => {
+    // 模型返回一个被截断的工具调用（参数残缺）+ max_tokens。
+    const llm = new FakeLLM(() => ({
+      stopReason: "max_tokens",
+      content: [
+        { type: "tool_use", id: "t1", name: "write_file", input: { path: "x" } },
+      ],
+    }));
+    const agent = new Agent(llm, { tools: [] });
+
+    await expect(agent.send("写个大文件")).rejects.toThrow(/max_tokens/);
+    // 只调用了一次模型就报错，没有进入空转循环。
+    expect(llm.calls).toHaveLength(1);
+  });
+
   test("onToolCall / onToolResult 回调会被触发", async () => {
     const { tool } = makeAddTool();
     let step = 0;

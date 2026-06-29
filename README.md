@@ -1,7 +1,10 @@
 # agent-study · 第 1 步：最简对话循环
 
-> 📈 **本仓库按步骤演进。** 当前代码已实现到 **第 2 步：工具调用循环**，详见
-> [docs/02-tool-calling-loop.md](docs/02-tool-calling-loop.md)。
+> 📈 **本仓库按步骤演进。** 当前代码已实现到 **第 3 步：常用内置工具**。步骤文档：
+>
+> - 第 2 步 · 工具调用循环 → [docs/02-tool-calling-loop.md](docs/02-tool-calling-loop.md)
+> - 第 3 步 · 常用内置工具（文件 / HTTP / Shell）→ [docs/03-builtin-tools.md](docs/03-builtin-tools.md)
+>
 > 本文件介绍的是**第 1 步内核**（最简对话循环）——它仍是理解后续步骤的基础。
 
 从最简单的 agent 循环出发，逐步构建完善的 agent 服务。这一步只做一件事：**一个能记住上下文的多轮对话 agent**。后续再往上叠加工具调用、规划、记忆等能力。

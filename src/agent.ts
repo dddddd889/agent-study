@@ -56,6 +56,16 @@ export class Agent {
         tools: this.tools,
       });
 
+      // 被 max_tokens 截断 => 这次输出是残缺的（文本没写完，或工具调用的
+      // 参数 JSON 被截断）。继续喂回去只会让循环空转，直接报清楚错，
+      // 提示调大 ANTHROPIC_MAX_TOKENS。
+      if (res.stopReason === "max_tokens") {
+        throw new Error(
+          "输出被 max_tokens 截断（内容或工具调用参数未生成完整）。" +
+            "请调大 max_tokens（环境变量 ANTHROPIC_MAX_TOKENS，claude-sonnet-4-6 上限 64000）。",
+        );
+      }
+
       const toolUses = res.content.filter(
         (b): b is ToolUseBlock => b.type === "tool_use",
       );

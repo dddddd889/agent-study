@@ -45,7 +45,11 @@ export class AnthropicLLM implements LLM {
     // 去掉末尾斜杠，避免拼出双斜杠。
     this.baseUrl = base.replace(/\/+$/, "");
     this.model = opts.model ?? process.env.ANTHROPIC_MODEL ?? "claude-sonnet-4-6";
-    this.maxTokens = opts.maxTokens ?? 1024;
+    // max_tokens 是单次回复的上限。太小会把长输出（或把内容写进 write_file 的
+    // tool_use 参数）截断，导致工具调用残缺、agent 循环空转。默认放到 8192，
+    // 足够写个贪吃蛇；可用 ANTHROPIC_MAX_TOKENS 覆盖。
+    this.maxTokens =
+      opts.maxTokens ?? (Number(process.env.ANTHROPIC_MAX_TOKENS) || 8192);
   }
 
   private buildHeaders(): Record<string, string> {

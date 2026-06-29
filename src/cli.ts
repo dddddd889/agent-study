@@ -10,7 +10,10 @@ import { defaultTools } from "./tools";
 async function main() {
   const llm = new AnthropicLLM();
   const agent = new Agent(llm, {
-    system: "你是一个简洁、友好的中文助手。可以使用工具来获取实时信息或做计算。",
+    system:
+      "你是一个简洁、友好的中文助手。可以使用工具来获取实时信息、读写文件、发起 HTTP 请求或执行 shell 命令。",
+    // defaultTools 含 shell，模型可自动执行任意命令。若有顾虑，可改成
+    // tools: defaultTools.filter((t) => t.name !== "shell") 把 shell 摘掉。
     tools: defaultTools,
     // 把工具调用过程打印出来，方便观察 agent 循环里发生了什么。
     onToolCall: ({ name, input }) =>
