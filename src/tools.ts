@@ -72,9 +72,9 @@ export const readFileTool: Tool = {
     required: ["path"],
   },
   // TODO: 路径沙箱 —— 限制在工作目录内，防止路径穿越 / 越权读取（如 ../../etc/passwd）。
-  async run(input) {
+  async run(input, ctx) {
     const path = String(input.path ?? "");
-    return truncate(await readFile(path, "utf-8"));
+    return truncate(await readFile(path, { encoding: "utf-8", signal: ctx?.signal }));
   },
 };
 
@@ -91,11 +91,11 @@ export const writeFileTool: Tool = {
     required: ["path", "content"],
   },
   // TODO: 路径沙箱 —— 限制在工作目录内，防止路径穿越 / 越权写入。
-  async run(input) {
+  async run(input, ctx) {
     const path = String(input.path ?? "");
     const content = String(input.content ?? "");
     await mkdir(dirname(path), { recursive: true });
-    await writeFile(path, content, "utf-8");
+    await writeFile(path, content, { encoding: "utf-8", signal: ctx?.signal });
     return `已写入 ${content.length} 个字符到 ${path}`;
   },
 };
@@ -115,17 +115,19 @@ export const httpRequestTool: Tool = {
     },
     required: ["url"],
   },
-  // TODO: 超时（AbortController）、重定向策略、SSRF 防护（如禁止访问内网地址）。
-  async run(input) {
+  // TODO: 超时（AbortSignal.timeout）、重定向策略、SSRF 防护（如禁止访问内网地址）。
+  async run(input, ctx) {
     const url = String(input.url ?? "");
     // 仅允许 http(s)，挡掉 file:// 等本地协议。
     if (!/^https?:\/\//i.test(url)) {
       throw new Error(`只允许 http/https URL: ${url}`);
     }
+    // 传入 signal：用户 Ctrl+C 时立即断开请求。
     const res = await fetch(url, {
       method: input.method ? String(input.method) : "GET",
       headers: input.headers as Record<string, string> | undefined,
       body: input.body != null ? String(input.body) : undefined,
+      signal: ctx?.signal,
     });
     const text = await res.text();
     return `HTTP ${res.status}\n\n${truncate(text)}`;
@@ -145,10 +147,14 @@ export const shellTool: Tool = {
     },
     required: ["command"],
   },
-  async run(input) {
+  async run(input, ctx) {
     const command = String(input.command ?? "");
     try {
-      const { stdout, stderr } = await execAsync(command, { timeout: 30_000 });
+      // signal：用户 Ctrl+C 时 kill 子进程；timeout：命令自身的 30s 上限。
+      const { stdout, stderr } = await execAsync(command, {
+        timeout: 30_000,
+        signal: ctx?.signal,
+      });
       return truncate([stdout, stderr].filter(Boolean).join("\n").trim() || "（无输出）");
     } catch (err) {
       // 非 0 退出 / 超时：把退出码和输出一并返回，交给 Agent 转成 is_error。

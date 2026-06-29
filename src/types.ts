@@ -38,6 +38,12 @@ export interface Message {
 }
 
 // ============ 工具定义 ============
+// 工具执行的上下文。用对象包装是为了可扩展（以后可加 onProgress / cwd 等）。
+export interface ToolContext {
+  // 中断信号：abort 后，会阻塞的工具（http / shell / 读写文件）应尽快停止。
+  signal?: AbortSignal;
+}
+
 // 一个工具 = 给模型看的「说明书」(name/description/inputSchema)
 //          + 本地真正执行的逻辑 (run)。
 export interface Tool {
@@ -45,8 +51,11 @@ export interface Tool {
   description: string; // 写清楚“什么时候用它”，模型据此决定是否调用
   // JSON Schema，描述参数结构，模型据此生成 input。
   inputSchema: Record<string, unknown>;
-  // 实际执行：拿到模型给的参数，返回文本结果（可异步）。
-  run(input: Record<string, unknown>): string | Promise<string>;
+  // 实际执行：拿到模型给的参数（和可选上下文），返回文本结果（可异步）。
+  run(
+    input: Record<string, unknown>,
+    ctx?: ToolContext,
+  ): string | Promise<string>;
 }
 
 // ============ LLM 抽象 ============
@@ -62,6 +71,8 @@ export interface LLMResponse {
 export interface CompleteOptions {
   system?: string;
   tools?: Tool[];
+  // 中断信号：abort 后正在进行的 fetch/SSE 流会立即断开。
+  signal?: AbortSignal;
 }
 
 // LLM 抽象接口：给定历史消息（和可选 system / tools），流式产出助手的下一步输出。

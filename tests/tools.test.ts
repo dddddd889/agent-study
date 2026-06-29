@@ -70,6 +70,34 @@ describe("http_request 工具", () => {
       httpRequestTool.run({ url: "file:///etc/passwd" }),
     ).rejects.toThrow(/http\/https/);
   });
+
+  test("把 ctx.signal 传给 fetch；signal 已 abort 时抛错", async () => {
+    let seenSignal: AbortSignal | undefined;
+    globalThis.fetch = (async (_url: any, init: any) => {
+      seenSignal = init?.signal;
+      if (init?.signal?.aborted) throw new DOMException("Aborted", "AbortError");
+      return new Response("ok", { status: 200 });
+    }) as unknown as typeof fetch;
+
+    const ac = new AbortController();
+    ac.abort();
+    await expect(
+      httpRequestTool.run({ url: "http://example.com" }, { signal: ac.signal }),
+    ).rejects.toThrow();
+    expect(seenSignal).toBe(ac.signal); // 确实把 signal 传给了 fetch
+  });
+});
+
+describe("shell 工具中断", () => {
+  test("中途 abort 能快速 kill 子进程（不傻等命令结束）", async () => {
+    const ac = new AbortController();
+    setTimeout(() => ac.abort(), 50); // 50ms 后中断
+    const start = Date.now();
+    await expect(
+      shellTool.run({ command: "sleep 3" }, { signal: ac.signal }),
+    ).rejects.toThrow();
+    expect(Date.now() - start).toBeLessThan(1500); // 远快于 3s
+  });
 });
 
 describe("shell 工具", () => {

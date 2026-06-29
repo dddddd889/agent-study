@@ -122,7 +122,10 @@ export class AnthropicLLM implements LLM {
     opts: CompleteOptions = {},
   ): AsyncGenerator<string, LLMResponse> {
     // fetchWithRetry 只负责「连上、拿到 2xx」；一旦开始读流，中途断不重试。
-    const res = await this.fetchWithRetry(this.buildBody(messages, opts, true));
+    const res = await this.fetchWithRetry(
+      this.buildBody(messages, opts, true),
+      opts.signal,
+    );
     if (!res.body) throw new Error("流式响应没有 body");
 
     const blocks: ContentBlock[] = [];
@@ -177,7 +180,10 @@ export class AnthropicLLM implements LLM {
     messages: Message[],
     opts: CompleteOptions = {},
   ): Promise<LLMResponse> {
-    const res = await this.fetchWithRetry(this.buildBody(messages, opts, false));
+    const res = await this.fetchWithRetry(
+      this.buildBody(messages, opts, false),
+      opts.signal,
+    );
     const data = (await res.json()) as {
       stop_reason: string;
       content: ContentBlock[];
@@ -186,8 +192,11 @@ export class AnthropicLLM implements LLM {
   }
 
   // 发请求并按需重试。返回的一定是 2xx 的 Response；否则抛错。
-  // 可重试：网络异常 / 429 / 5xx；不可重试：4xx（请求本身的问题）。
-  private async fetchWithRetry(body: string): Promise<Response> {
+  // 可重试：网络异常 / 429 / 5xx；不可重试：4xx（请求本身的问题）、以及被 abort。
+  private async fetchWithRetry(
+    body: string,
+    signal?: AbortSignal,
+  ): Promise<Response> {
     const url = `${this.baseUrl}/v1/messages`;
 
     // attempt = 0 是初始请求，1..maxRetries 是重试。
@@ -199,12 +208,18 @@ export class AnthropicLLM implements LLM {
           method: "POST",
           headers: this.buildHeaders(),
           body,
+          signal,
         });
       } catch (err) {
         networkErr = err as Error;
       }
 
       if (res && res.ok) return res; // 成功
+
+      // 被中断不是"网络抖动"，不重试，直接抛出。
+      if (signal?.aborted) {
+        throw networkErr ?? signal.reason ?? new Error("已中断");
+      }
 
       const status = res?.status;
       const retryable =

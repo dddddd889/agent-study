@@ -325,6 +325,25 @@ describe("AnthropicLLM 流式 stream()", () => {
     expect(i).toBe(2); // 1 次 502 + 1 次成功
   });
 
+  test("已 abort 的 signal：直接抛错、不当作网络抖动重试", async () => {
+    let calls = 0;
+    globalThis.fetch = (async (_url: any, init: any) => {
+      calls++;
+      // 模拟 fetch 对已 abort 的 signal 抛 AbortError
+      if (init?.signal?.aborted) throw new DOMException("Aborted", "AbortError");
+      return sseResponse(textSSE);
+    }) as unknown as typeof fetch;
+
+    const ac = new AbortController();
+    ac.abort();
+    const llm = new AnthropicLLM({ authToken: "t", retryBaseMs: 0 });
+
+    await expect(
+      drain(llm.stream([{ role: "user", content: "x" }], { signal: ac.signal })),
+    ).rejects.toThrow();
+    expect(calls).toBe(1); // abort 不重试
+  });
+
   test("跨 chunk 半行：data 行被拆到两个 chunk 仍能正确解析", async () => {
     const mid = Math.floor(textSSE.length / 2); // 必然切在某一行中间
     globalThis.fetch = (async () =>

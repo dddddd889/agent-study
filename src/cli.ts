@@ -45,6 +45,16 @@ async function main() {
     output: process.stdout,
     prompt: "你 > ",
   });
+
+  // 当前回合的中断控制器；非 null 表示「正在回复中」。
+  let currentAbort: AbortController | null = null;
+  // Ctrl+C：回合中 => 中断本轮；空闲 => 退出。
+  // 注意：这里不能在回合期间 rl.pause()，否则 readline 读不到 Ctrl+C 按键。
+  rl.on("SIGINT", () => {
+    if (currentAbort) currentAbort.abort();
+    else rl.close();
+  });
+
   rl.prompt();
 
   for await (const line of rl) {
@@ -62,14 +72,12 @@ async function main() {
       continue;
     }
 
+    currentAbort = new AbortController();
     try {
-      // 回合期间暂停 readline 输入：避免 AI 还在流式回复时用户抢着打字，
-      // 导致输入被缓冲、提示符与流式输出交错。结束后在 finally 里恢复。
-      rl.pause();
       // 流式：先打印前缀，回复内容由 onTextDelta 边到边写出，结束后补换行。
       // 不再打印 send() 的返回值（否则会和流式内容重复）。
       process.stdout.write("\nAI > ");
-      const reply = await agent.send(text);
+      const reply = await agent.send(text, { signal: currentAbort.signal });
       process.stdout.write("\n");
       // 模型以 end_turn 收场却没产出任何文本（常见于工具失败后直接放弃），
       // 补一句说明，免得“静默结束”看起来像卡住 / 答案被截断。
@@ -78,9 +86,13 @@ async function main() {
       }
       process.stdout.write("\n");
     } catch (err) {
-      console.error(`\n[出错] ${(err as Error).message}\n`);
+      if (currentAbort.signal.aborted) {
+        process.stdout.write("\n(已中断)\n\n"); // 用户按了 Ctrl+C
+      } else {
+        console.error(`\n[出错] ${(err as Error).message}\n`);
+      }
     } finally {
-      rl.resume();
+      currentAbort = null;
     }
 
     rl.prompt();

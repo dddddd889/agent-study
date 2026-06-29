@@ -64,71 +64,94 @@ export class Agent {
   }
 
   // 一轮对话（内部可能包含多步工具调用），返回最终的文本回复。
-  async send(userInput: string): Promise<string> {
-    this.history.push({ role: "user", content: userInput });
+  // opts.signal: 中断信号。abort 后流式立即断开、循环在边界停止，
+  // 并把这一轮新增的所有消息整轮回滚（避免残缺的 tool_use 污染历史）。
+  async send(
+    userInput: string,
+    opts: { signal?: AbortSignal } = {},
+  ): Promise<string> {
+    const { signal } = opts;
+    // 记下「这一轮的起点」用对象引用，而非下标 —— 因为 compactHistory 可能在
+    // 中途截掉更早的轮、令下标偏移。回滚时按引用重新定位。
+    const userMsg: Message = { role: "user", content: userInput };
+    this.history.push(userMsg);
 
-    // agent 循环：每次迭代 = 调一次模型。
-    for (let step = 0; step < this.maxSteps; step++) {
-      // 调模型前先做上下文管理：历史过长就按整轮截断最旧的对话。
-      // 放在循环顶部，是因为工具循环里 history 还会增长，每轮都校一次最稳。
-      this.compactHistory();
+    try {
+      // agent 循环：每次迭代 = 调一次模型。
+      for (let step = 0; step < this.maxSteps; step++) {
+        // 调模型前先做上下文管理：历史过长就按整轮截断最旧的对话。
+        this.compactHistory();
+        signal?.throwIfAborted();
 
-      // 消费流式生成器：yield 的是文本增量(实时显示)，done 时的 value 是
-      // 组装好的完整 LLMResponse(后续逻辑照常用它)。
-      const it = this.llm.stream(this.history, {
-        system: this.system,
-        tools: this.tools,
-      });
-      let step = await it.next();
-      while (!step.done) {
-        this.onTextDelta?.(step.value);
-        step = await it.next();
-      }
-      const res = step.value;
-
-      // 被 max_tokens 截断 => 这次输出是残缺的（文本没写完，或工具调用的
-      // 参数 JSON 被截断）。继续喂回去只会让循环空转，直接报清楚错，
-      // 提示调大 ANTHROPIC_MAX_TOKENS。
-      if (res.stopReason === "max_tokens") {
-        throw new Error(
-          "输出被 max_tokens 截断（内容或工具调用参数未生成完整）。" +
-            "请调大 max_tokens（环境变量 ANTHROPIC_MAX_TOKENS，claude-sonnet-4-6 上限 64000）。",
-        );
-      }
-
-      const toolUses = res.content.filter(
-        (b): b is ToolUseBlock => b.type === "tool_use",
-      );
-
-      // 没有工具调用 => 这就是最终答复，结束循环。
-      // 纯文本回复存成字符串，让历史更直观（与无工具场景保持一致）。
-      if (toolUses.length === 0) {
-        const text = this.extractText(res.content);
-        this.history.push({ role: "assistant", content: text });
-        return text;
-      }
-
-      // 有工具调用 => 完整存下这一步的内容块（含 tool_use，结果要靠它的 id 对应）。
-      this.history.push({ role: "assistant", content: res.content });
-
-      // 逐个执行工具，把结果收集成一条 user 消息（tool_result 块数组）。
-      const results: ToolResultBlock[] = [];
-      for (const call of toolUses) {
-        this.onToolCall?.({ name: call.name, input: call.input });
-        const { content, isError } = await this.runTool(call);
-        this.onToolResult?.({ name: call.name, content, isError });
-        results.push({
-          type: "tool_result",
-          tool_use_id: call.id,
-          content,
-          is_error: isError,
+        // 消费流式生成器：yield 的是文本增量(实时显示)，done 时的 value 是
+        // 组装好的完整 LLMResponse(后续逻辑照常用它)。abort 会让 fetch 断开，
+        // it.next() 抛出，从而跳出本方法、进入下面的回滚。
+        const it = this.llm.stream(this.history, {
+          system: this.system,
+          tools: this.tools,
+          signal,
         });
-      }
-      this.history.push({ role: "user", content: results });
-      // 继续下一轮：模型这次能看到工具结果，再决定下一步。
-    }
+        let chunk = await it.next();
+        while (!chunk.done) {
+          this.onTextDelta?.(chunk.value);
+          chunk = await it.next();
+        }
+        const res = chunk.value;
+        signal?.throwIfAborted();
 
-    throw new Error(`超过最大工具调用步数（${this.maxSteps}），可能陷入循环`);
+        // 被 max_tokens 截断 => 这次输出是残缺的（文本没写完，或工具调用的
+        // 参数 JSON 被截断）。继续喂回去只会让循环空转，直接报清楚错。
+        if (res.stopReason === "max_tokens") {
+          throw new Error(
+            "输出被 max_tokens 截断（内容或工具调用参数未生成完整）。" +
+              "请调大 max_tokens（环境变量 ANTHROPIC_MAX_TOKENS，claude-sonnet-4-6 上限 64000）。",
+          );
+        }
+
+        const toolUses = res.content.filter(
+          (b): b is ToolUseBlock => b.type === "tool_use",
+        );
+
+        // 没有工具调用 => 这就是最终答复，结束循环。
+        // 纯文本回复存成字符串，让历史更直观（与无工具场景保持一致）。
+        if (toolUses.length === 0) {
+          const text = this.extractText(res.content);
+          this.history.push({ role: "assistant", content: text });
+          return text;
+        }
+
+        // 有工具调用 => 完整存下这一步的内容块（含 tool_use，结果要靠它的 id 对应）。
+        this.history.push({ role: "assistant", content: res.content });
+
+        // 逐个执行工具，把结果收集成一条 user 消息（tool_result 块数组）。
+        // TODO: 把 signal 也传进 tool.run，让执行中的慢命令/请求本身可被中断。
+        const results: ToolResultBlock[] = [];
+        for (const call of toolUses) {
+          signal?.throwIfAborted();
+          this.onToolCall?.({ name: call.name, input: call.input });
+          const { content, isError } = await this.runTool(call, signal);
+          this.onToolResult?.({ name: call.name, content, isError });
+          results.push({
+            type: "tool_result",
+            tool_use_id: call.id,
+            content,
+            is_error: isError,
+          });
+        }
+        this.history.push({ role: "user", content: results });
+        // 继续下一轮：模型这次能看到工具结果，再决定下一步。
+      }
+
+      throw new Error(`超过最大工具调用步数（${this.maxSteps}），可能陷入循环`);
+    } catch (err) {
+      // 被中断 => 整轮回滚：把从 userMsg 起新增的所有消息删掉，
+      // 历史恢复到发送前的样子（永远合法，不留孤儿 tool_use）。
+      if (signal?.aborted) {
+        const i = this.history.indexOf(userMsg);
+        if (i >= 0) this.history.length = i;
+      }
+      throw err;
+    }
   }
 
   // 上下文管理：历史估算 token 超过 maxContextTokens 时，按整轮截断最旧的对话。
@@ -151,19 +174,22 @@ export class Agent {
     });
   }
 
-  // 执行单个工具调用，永远返回文本结果；出错也转成 is_error 结果块，
-  // 让模型能看到错误信息并自行纠正，而不是直接抛断对话。
+  // 执行单个工具调用。出错转成 is_error 结果块让模型纠正；
+  // 但「用户中断」(signal.aborted) 例外 —— 上抛给 send 触发整轮回滚，
+  // 不喂回一条马上要被回滚的 is_error。
   private async runTool(
     call: ToolUseBlock,
+    signal?: AbortSignal,
   ): Promise<{ content: string; isError: boolean }> {
     const tool = this.tools.find((t) => t.name === call.name);
     if (!tool) {
       return { content: `未知工具: ${call.name}`, isError: true };
     }
     try {
-      const out = await tool.run(call.input);
+      const out = await tool.run(call.input, { signal });
       return { content: String(out), isError: false };
     } catch (err) {
+      if (signal?.aborted) throw err; // 用户中断 → 上抛
       return { content: (err as Error).message, isError: true };
     }
   }

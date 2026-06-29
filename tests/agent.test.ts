@@ -227,6 +227,55 @@ describe("Agent 工具调用循环", () => {
     expect(llm.calls).toHaveLength(1);
   });
 
+  test("已 abort 的 signal：send 抛错并整轮回滚（不留这一轮的消息）", async () => {
+    const llm = new FakeLLM();
+    const agent = new Agent(llm);
+
+    await agent.send("第一句"); // 正常一轮 → 历史 2 条
+    expect(agent.getHistory()).toHaveLength(2);
+
+    const ac = new AbortController();
+    ac.abort(); // 发送前就中断
+
+    await expect(
+      agent.send("第二句", { signal: ac.signal }),
+    ).rejects.toThrow();
+
+    // 第二轮被整轮回滚：历史仍是第一轮的 2 条，"第二句"没留下
+    expect(agent.getHistory()).toHaveLength(2);
+    expect(agent.getHistory()[0]!.content).toBe("第一句");
+  });
+
+  test("工具执行中中断：上抛并整轮回滚", async () => {
+    // 一个挂起到 signal abort 才 reject 的假工具
+    const hangTool: Tool = {
+      name: "hang",
+      description: "一直挂起，直到被中断",
+      inputSchema: { type: "object", properties: {} },
+      run: (_input, ctx) =>
+        new Promise((_resolve, reject) => {
+          ctx?.signal?.addEventListener("abort", () =>
+            reject(new Error("aborted")),
+          );
+        }),
+    };
+    // 模型先要求调用 hang 工具
+    const llm = new FakeLLM(() => ({
+      stopReason: "tool_use",
+      content: [{ type: "tool_use", id: "h", name: "hang", input: {} }],
+    }));
+    const agent = new Agent(llm, { tools: [hangTool] });
+
+    const ac = new AbortController();
+    const p = agent.send("go", { signal: ac.signal });
+    await new Promise((r) => setTimeout(r, 10)); // 等 send 进到工具里挂起
+    ac.abort(); // 工具执行中中断
+
+    await expect(p).rejects.toThrow();
+    // 整轮回滚：连用户消息都不留
+    expect(agent.getHistory()).toHaveLength(0);
+  });
+
   test("onTextDelta 收到模型回复的文本增量", async () => {
     const llm = new FakeLLM(() => "你好世界");
     const chunks: string[] = [];
