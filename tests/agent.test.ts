@@ -227,6 +227,17 @@ describe("Agent 工具调用循环", () => {
     expect(llm.calls).toHaveLength(1);
   });
 
+  test("onTextDelta 收到模型回复的文本增量", async () => {
+    const llm = new FakeLLM(() => "你好世界");
+    const chunks: string[] = [];
+    const agent = new Agent(llm, { onTextDelta: (t) => chunks.push(t) });
+
+    const reply = await agent.send("hi");
+
+    expect(reply).toBe("你好世界");
+    expect(chunks.join("")).toBe("你好世界"); // 增量拼起来 = 最终回复
+  });
+
   test("历史超过 maxContextTokens 时按轮截断，并触发 onTruncate", async () => {
     const llm = new FakeLLM();
     const events: Array<{ droppedTurns: number }> = [];

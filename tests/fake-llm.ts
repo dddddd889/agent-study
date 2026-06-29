@@ -14,7 +14,7 @@ type Responder = (
 ) => string | LLMResponse;
 
 // 测试用的假 LLM：不发网络请求，方便离线 debug。
-// calls 记录每次 complete 收到的参数，便于断言。
+// calls 记录每次 stream 收到的参数，便于断言。
 export class FakeLLM implements LLM {
   public calls: Array<{
     messages: Message[];
@@ -35,10 +35,12 @@ export class FakeLLM implements LLM {
       });
   }
 
-  async complete(
+  // 实现 LLM 接口的流式方法：把最终文本作为「一段增量」yield 出去，
+  // 再 return 组装好的 LLMResponse。测试断言最终行为，不关心增量粒度。
+  async *stream(
     messages: Message[],
     opts: CompleteOptions = {},
-  ): Promise<LLMResponse> {
+  ): AsyncGenerator<string, LLMResponse> {
     // 存一份浅拷贝，避免后续历史变动影响断言。
     this.calls.push({
       messages: messages.map((m) => ({ ...m })),
@@ -46,9 +48,17 @@ export class FakeLLM implements LLM {
       tools: opts.tools,
     });
     const out = this.responder(messages, opts);
-    // 允许 responder 直接返回字符串：包装成一段 end_turn 的纯文本回复。
-    return typeof out === "string"
-      ? { stopReason: "end_turn", content: [{ type: "text", text: out }] }
-      : out;
+    const res: LLMResponse =
+      typeof out === "string"
+        ? { stopReason: "end_turn", content: [{ type: "text", text: out }] }
+        : out;
+
+    const text = res.content
+      .filter((b) => b.type === "text")
+      .map((b) => (b.type === "text" ? b.text : ""))
+      .join("");
+    if (text) yield text;
+
+    return res;
   }
 }

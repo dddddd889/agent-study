@@ -62,11 +62,15 @@ export class AnthropicLLM implements LLM {
     // 去掉末尾斜杠，避免拼出双斜杠。
     this.baseUrl = base.replace(/\/+$/, "");
     this.model = opts.model ?? process.env.ANTHROPIC_MODEL ?? "claude-sonnet-4-6";
-    // max_tokens 是单次回复的上限。太小会把长输出（或把内容写进 write_file 的
-    // tool_use 参数）截断，导致工具调用残缺、agent 循环空转。默认放到 8192，
-    // 足够写个贪吃蛇；可用 ANTHROPIC_MAX_TOKENS 覆盖。
+    // max_tokens 是单次回复的输出上限。太小会把长输出（或把内容写进 write_file
+    // 的 tool_use 参数）截断，导致工具调用残缺、agent 循环空转。
+    // 默认直接拉满到 claude-sonnet-4-6 的输出上限 64000：
+    //   - agent 走流式（stream()），大 max_tokens 不会触发非流式的 HTTP 超时；
+    //   - max_tokens 只是上限，实际只按生成的 token 计费，调高没有额外成本。
+    // 注意：这是 sonnet-4-6 的上限；opus / fable 可到 128000。换模型时可用
+    // ANTHROPIC_MAX_TOKENS 覆盖。
     this.maxTokens =
-      opts.maxTokens ?? (Number(process.env.ANTHROPIC_MAX_TOKENS) || 8192);
+      opts.maxTokens ?? (Number(process.env.ANTHROPIC_MAX_TOKENS) || 64000);
     this.maxRetries = opts.maxRetries ?? 3;
     this.retryBaseMs = opts.retryBaseMs ?? 500;
     this.retryCapMs = opts.retryCapMs ?? 8000;
@@ -87,14 +91,13 @@ export class AnthropicLLM implements LLM {
     return headers;
   }
 
-  async complete(
-    messages: Message[],
-    opts: CompleteOptions = {},
-  ): Promise<LLMResponse> {
+  // 拼请求体。stream=true 时让 API 走 SSE 流式返回。
+  private buildBody(messages: Message[], opts: CompleteOptions, stream: boolean) {
     const { system, tools } = opts;
-    const body = JSON.stringify({
+    return JSON.stringify({
       model: this.model,
       max_tokens: this.maxTokens,
+      ...(stream ? { stream: true } : {}),
       ...(system ? { system } : {}),
       // 把工具的「说明书」传给模型（run 是本地逻辑，不发给 API）。
       ...(tools && tools.length
@@ -109,20 +112,77 @@ export class AnthropicLLM implements LLM {
       // content 直接透传：字符串或内容块数组（含 tool_use / tool_result）都合法。
       messages: messages.map((m) => ({ role: m.role, content: m.content })),
     });
+  }
 
-    const res = await this.fetchWithRetry(body);
+  // 流式：yield 文本增量，return 组装好的完整 LLMResponse。
+  // 内部解析「完整 SSE 事件流」，但对外只吐文本（工具调用静默组装进 return）。
+  // TODO: 想暴露「全事件流」(fullStream，含工具参数碎片)时，再多 yield 几种事件即可。
+  async *stream(
+    messages: Message[],
+    opts: CompleteOptions = {},
+  ): AsyncGenerator<string, LLMResponse> {
+    // fetchWithRetry 只负责「连上、拿到 2xx」；一旦开始读流，中途断不重试。
+    const res = await this.fetchWithRetry(this.buildBody(messages, opts, true));
+    if (!res.body) throw new Error("流式响应没有 body");
 
+    const blocks: ContentBlock[] = [];
+    const toolJson: string[] = []; // index -> 累积的 tool_use 参数 JSON 碎片
+    let stopReason = "end_turn";
+
+    for await (const evt of parseSSE(res.body)) {
+      switch (evt.type) {
+        case "content_block_start": {
+          const cb = evt.content_block;
+          if (cb.type === "text") {
+            blocks[evt.index] = { type: "text", text: cb.text ?? "" };
+          } else if (cb.type === "tool_use") {
+            blocks[evt.index] = { type: "tool_use", id: cb.id, name: cb.name, input: {} };
+            toolJson[evt.index] = "";
+          }
+          break;
+        }
+        case "content_block_delta": {
+          const d = evt.delta;
+          if (d.type === "text_delta") {
+            const b = blocks[evt.index];
+            if (b && b.type === "text") b.text += d.text;
+            yield d.text; // 只把文本增量吐给上层显示
+          } else if (d.type === "input_json_delta") {
+            // 工具参数是逐碎片来的 JSON 文本，先累积，等块结束再 parse。
+            toolJson[evt.index] = (toolJson[evt.index] ?? "") + (d.partial_json ?? "");
+          }
+          break;
+        }
+        case "content_block_stop": {
+          const b = blocks[evt.index];
+          if (b && b.type === "tool_use") {
+            const raw = toolJson[evt.index] ?? "";
+            b.input = raw ? JSON.parse(raw) : {};
+          }
+          break;
+        }
+        case "message_delta": {
+          if (evt.delta?.stop_reason) stopReason = evt.delta.stop_reason;
+          break;
+        }
+        // message_start / message_stop 不需要特殊处理
+      }
+    }
+
+    return { stopReason, content: blocks.filter(Boolean) };
+  }
+
+  // 非流式版本（保留作参考实现 + 现有测试用，不在 LLM 接口里）。
+  async complete(
+    messages: Message[],
+    opts: CompleteOptions = {},
+  ): Promise<LLMResponse> {
+    const res = await this.fetchWithRetry(this.buildBody(messages, opts, false));
     const data = (await res.json()) as {
       stop_reason: string;
       content: ContentBlock[];
     };
-
-    // 把 stop_reason 和原始内容块（text / tool_use）交给上层。
-    // 上层据 stop_reason 判断是否还要执行工具、继续循环。
-    return {
-      stopReason: data.stop_reason,
-      content: data.content,
-    };
+    return { stopReason: data.stop_reason, content: data.content };
   }
 
   // 发请求并按需重试。返回的一定是 2xx 的 Response；否则抛错。
@@ -199,4 +259,52 @@ export class AnthropicLLM implements LLM {
 
 function sleep(ms: number): Promise<void> {
   return ms > 0 ? new Promise((r) => setTimeout(r, ms)) : Promise.resolve();
+}
+
+// 解析 Server-Sent Events 流,逐个 yield 出 data 行里的 JSON 对象。
+// SSE 约定:每个事件由若干 `data:` 行组成,以空行结束;我们只关心 data 的 JSON
+// (它自带 type 字段),忽略 `event:` 等其它字段。
+// 关键:网络分块(chunk)边界和事件边界无关,一行可能被拆到两个 chunk —— 用 buffer
+// 缓冲未结束的半行,直到收到换行才处理。
+async function* parseSSE(
+  body: ReadableStream<Uint8Array>,
+): AsyncGenerator<any> {
+  const reader = body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = "";
+  let dataLines: string[] = [];
+
+  const flush = function* () {
+    if (dataLines.length === 0) return;
+    const payload = dataLines.join("\n");
+    dataLines = [];
+    if (payload && payload !== "[DONE]") {
+      try {
+        yield JSON.parse(payload) as any;
+      } catch {
+        // 半个/损坏的 JSON 直接跳过
+      }
+    }
+  };
+
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    buffer += decoder.decode(value, { stream: true });
+
+    let nl: number;
+    while ((nl = buffer.indexOf("\n")) >= 0) {
+      let line = buffer.slice(0, nl);
+      buffer = buffer.slice(nl + 1);
+      if (line.endsWith("\r")) line = line.slice(0, -1); // 兼容 CRLF
+
+      if (line === "") {
+        yield* flush(); // 空行 = 事件边界
+      } else if (line.startsWith("data:")) {
+        dataLines.push(line.slice(5).replace(/^ /, ""));
+      }
+      // 其它字段(event: / id: / :comment)忽略
+    }
+  }
+  yield* flush(); // 末尾没有空行时也兜底处理
 }

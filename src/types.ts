@@ -64,8 +64,17 @@ export interface CompleteOptions {
   tools?: Tool[];
 }
 
-// LLM 抽象接口：给定历史消息（和可选 system / tools），返回助手的下一步输出。
+// LLM 抽象接口：给定历史消息（和可选 system / tools），流式产出助手的下一步输出。
 // 抽象成接口，是为了让 Agent 不依赖具体厂商，测试时可换成 FakeLLM。
+//
+// stream() 是异步生成器：
+//   - yield 出「文本增量」(string)，供上层边到边显示；
+//   - return 出组装好的完整 LLMResponse（文本 + 工具调用 + stopReason），
+//     供 agent 循环判断是否继续。
+// 不需要实时显示时，忽略 yield 的增量、只用 return 的结果即可。
 export interface LLM {
-  complete(messages: Message[], opts?: CompleteOptions): Promise<LLMResponse>;
+  stream(
+    messages: Message[],
+    opts?: CompleteOptions,
+  ): AsyncGenerator<string, LLMResponse>;
 }

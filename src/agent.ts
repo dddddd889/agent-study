@@ -17,6 +17,8 @@ export interface AgentOptions {
   // 上下文管理：历史估算 token 超过此值时，按整轮截断最旧的对话。默认 100000。
   // 想观察截断效果，把它调小（如 500）即可。
   maxContextTokens?: number;
+  // 模型回复的文本增量回调，便于 CLI 边生成边显示（流式）。
+  onTextDelta?: (text: string) => void;
   // 可选事件回调，便于 CLI 展示「正在调用工具 / 工具结果」等过程。
   onToolCall?: (call: { name: string; input: Record<string, unknown> }) => void;
   onToolResult?: (result: {
@@ -43,6 +45,7 @@ export class Agent {
   private tools: Tool[];
   private maxSteps: number;
   private maxContextTokens: number;
+  private onTextDelta?: AgentOptions["onTextDelta"];
   private onToolCall?: AgentOptions["onToolCall"];
   private onToolResult?: AgentOptions["onToolResult"];
   private onTruncate?: AgentOptions["onTruncate"];
@@ -54,6 +57,7 @@ export class Agent {
     this.tools = opts.tools ?? [];
     this.maxSteps = opts.maxSteps ?? 10;
     this.maxContextTokens = opts.maxContextTokens ?? 100000;
+    this.onTextDelta = opts.onTextDelta;
     this.onToolCall = opts.onToolCall;
     this.onToolResult = opts.onToolResult;
     this.onTruncate = opts.onTruncate;
@@ -69,10 +73,18 @@ export class Agent {
       // 放在循环顶部，是因为工具循环里 history 还会增长，每轮都校一次最稳。
       this.compactHistory();
 
-      const res = await this.llm.complete(this.history, {
+      // 消费流式生成器：yield 的是文本增量(实时显示)，done 时的 value 是
+      // 组装好的完整 LLMResponse(后续逻辑照常用它)。
+      const it = this.llm.stream(this.history, {
         system: this.system,
         tools: this.tools,
       });
+      let step = await it.next();
+      while (!step.done) {
+        this.onTextDelta?.(step.value);
+        step = await it.next();
+      }
+      const res = step.value;
 
       // 被 max_tokens 截断 => 这次输出是残缺的（文本没写完，或工具调用的
       // 参数 JSON 被截断）。继续喂回去只会让循环空转，直接报清楚错，
