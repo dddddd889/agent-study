@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { Agent } from "../src/agent";
-import type { Tool } from "../src/types";
+import type { LLM, Message, Tool } from "../src/types";
 import { FakeLLM } from "./fake-llm";
 
 describe("Agent 对话循环", () => {
@@ -227,30 +227,73 @@ describe("Agent 工具调用循环", () => {
     expect(llm.calls).toHaveLength(1);
   });
 
-  test("已 abort 的 signal：send 抛错并整轮回滚（不留这一轮的消息）", async () => {
-    const llm = new FakeLLM();
-    const agent = new Agent(llm);
+  test("onTurnComplete 正常结束时带本轮新增消息触发", async () => {
+    const llm = new FakeLLM(() => "你好");
+    const turns: Message[][] = [];
+    const agent = new Agent(llm, { onTurnComplete: (added) => turns.push(added) });
 
-    await agent.send("第一句"); // 正常一轮 → 历史 2 条
-    expect(agent.getHistory()).toHaveLength(2);
+    await agent.send("在吗");
 
-    const ac = new AbortController();
-    ac.abort(); // 发送前就中断
-
-    await expect(
-      agent.send("第二句", { signal: ac.signal }),
-    ).rejects.toThrow();
-
-    // 第二轮被整轮回滚：历史仍是第一轮的 2 条，"第二句"没留下
-    expect(agent.getHistory()).toHaveLength(2);
-    expect(agent.getHistory()[0]!.content).toBe("第一句");
+    expect(turns).toHaveLength(1);
+    expect(turns[0]).toEqual([
+      { role: "user", content: "在吗" },
+      { role: "assistant", content: "你好" },
+    ]);
   });
 
-  test("工具执行中中断：上抛并整轮回滚", async () => {
-    // 一个挂起到 signal abort 才 reject 的假工具
+  test("loadHistory 能恢复历史，续聊时模型看得到", async () => {
+    const llm = new FakeLLM();
+    const agent = new Agent(llm);
+    agent.loadHistory([
+      { role: "user", content: "我叫小明" },
+      { role: "assistant", content: "你好小明" },
+    ]);
+
+    await agent.send("我叫什么");
+
+    // 第二轮调用时，传给 LLM 的 messages 含恢复的历史
+    expect(llm.calls[0]!.messages).toEqual([
+      { role: "user", content: "我叫小明" },
+      { role: "assistant", content: "你好小明" },
+      { role: "user", content: "我叫什么" },
+    ]);
+  });
+
+  test("中断封口（流式中）：保留半截文本 + 触发 onTurnComplete", async () => {
+    // 一个边 yield 文本边等待 abort 的假 LLM
+    const llm: LLM = {
+      async *stream(_messages, opts) {
+        yield "我正在";
+        yield "回答";
+        await new Promise((_r, rej) =>
+          opts?.signal?.addEventListener("abort", () =>
+            rej(new Error("aborted")),
+          ),
+        );
+        return { stopReason: "end_turn", content: [] };
+      },
+    };
+    const added: Message[][] = [];
+    const agent = new Agent(llm, { onTurnComplete: (a) => added.push(a) });
+
+    const ac = new AbortController();
+    const p = agent.send("问题", { signal: ac.signal });
+    await new Promise((r) => setTimeout(r, 10));
+    ac.abort();
+
+    await expect(p).rejects.toThrow();
+    // 封口：用户提问 + 半截文本作为 assistant 消息
+    expect(agent.getHistory()).toEqual([
+      { role: "user", content: "问题" },
+      { role: "assistant", content: "我正在回答" },
+    ]);
+    expect(added).toHaveLength(1); // 中断也触发了落盘回调
+  });
+
+  test("中断封口（工具中）：给未完成 tool_use 补 is_error 取消结果", async () => {
     const hangTool: Tool = {
       name: "hang",
-      description: "一直挂起，直到被中断",
+      description: "挂起直到被中断",
       inputSchema: { type: "object", properties: {} },
       run: (_input, ctx) =>
         new Promise((_resolve, reject) => {
@@ -259,21 +302,30 @@ describe("Agent 工具调用循环", () => {
           );
         }),
     };
-    // 模型先要求调用 hang 工具
     const llm = new FakeLLM(() => ({
       stopReason: "tool_use",
       content: [{ type: "tool_use", id: "h", name: "hang", input: {} }],
     }));
-    const agent = new Agent(llm, { tools: [hangTool] });
+    const added: Message[][] = [];
+    const agent = new Agent(llm, {
+      tools: [hangTool],
+      onTurnComplete: (a) => added.push(a),
+    });
 
     const ac = new AbortController();
     const p = agent.send("go", { signal: ac.signal });
-    await new Promise((r) => setTimeout(r, 10)); // 等 send 进到工具里挂起
-    ac.abort(); // 工具执行中中断
+    await new Promise((r) => setTimeout(r, 10));
+    ac.abort();
 
     await expect(p).rejects.toThrow();
-    // 整轮回滚：连用户消息都不留
-    expect(agent.getHistory()).toHaveLength(0);
+
+    const h = agent.getHistory();
+    // 封口：user / assistant(tool_use) / user(被中断的 tool_result)，结构合法
+    expect(h).toHaveLength(3);
+    expect(h[2]!.content).toEqual([
+      { type: "tool_result", tool_use_id: "h", content: "[已被用户中断]", is_error: true },
+    ]);
+    expect(added).toHaveLength(1);
   });
 
   test("onTextDelta 收到模型回复的文本增量", async () => {

@@ -32,6 +32,9 @@ export interface AgentOptions {
     beforeTokens: number;
     afterTokens: number;
   }) => void;
+  // 一轮的消息「提交到历史」时触发（正常结束 + 中断封口都算），
+  // 带本轮新增的消息，供上层持久化（追加落盘）。
+  onTurnComplete?: (added: Message[]) => void;
 }
 
 // 带工具调用循环的 Agent。
@@ -49,6 +52,7 @@ export class Agent {
   private onToolCall?: AgentOptions["onToolCall"];
   private onToolResult?: AgentOptions["onToolResult"];
   private onTruncate?: AgentOptions["onTruncate"];
+  private onTurnComplete?: AgentOptions["onTurnComplete"];
   private history: Message[] = [];
 
   constructor(llm: LLM, opts: AgentOptions = {}) {
@@ -61,31 +65,51 @@ export class Agent {
     this.onToolCall = opts.onToolCall;
     this.onToolResult = opts.onToolResult;
     this.onTruncate = opts.onTruncate;
+    this.onTurnComplete = opts.onTurnComplete;
+  }
+
+  // 续聊：把磁盘读回来的历史灌进内存（覆盖当前历史）。
+  loadHistory(messages: Message[]): void {
+    this.history = [...messages];
   }
 
   // 一轮对话（内部可能包含多步工具调用），返回最终的文本回复。
-  // opts.signal: 中断信号。abort 后流式立即断开、循环在边界停止，
-  // 并把这一轮新增的所有消息整轮回滚（避免残缺的 tool_use 污染历史）。
+  // opts.signal: 中断信号。中断时不再整轮回滚，而是「封口」成合法状态(业界标准)：
+  //   - 流式中中断 → 把已流出的半截文本留成 assistant 消息；
+  //   - 工具执行中中断 → 给未完成的 tool_use 补一条 is_error 取消结果。
+  // 然后把这条(合法的)轮保留进历史 + 触发 onTurnComplete 落盘，再抛出中断错误。
   async send(
     userInput: string,
     opts: { signal?: AbortSignal } = {},
   ): Promise<string> {
     const { signal } = opts;
-    // 记下「这一轮的起点」用对象引用，而非下标 —— 因为 compactHistory 可能在
-    // 中途截掉更早的轮、令下标偏移。回滚时按引用重新定位。
-    const userMsg: Message = { role: "user", content: userInput };
-    this.history.push(userMsg);
+
+    // 本轮新增的消息（供持久化）；commit = 同时写进历史和 added。
+    const added: Message[] = [];
+    const commit = (m: Message) => {
+      this.history.push(m);
+      added.push(m);
+    };
+    commit({ role: "user", content: userInput });
+
+    // 跟踪当前阶段，供中断封口判断该补什么。
+    let partialText = ""; // 流式阶段已流出的文本
+    let pendingToolUses: ToolUseBlock[] | null = null; // 工具阶段：待收尾的 tool_use
+    let pendingResults: ToolResultBlock[] = []; // 工具阶段：已收集的结果
 
     try {
       // agent 循环：每次迭代 = 调一次模型。
       for (let step = 0; step < this.maxSteps; step++) {
+        partialText = "";
+        pendingToolUses = null;
+        pendingResults = [];
+
         // 调模型前先做上下文管理：历史过长就按整轮截断最旧的对话。
         this.compactHistory();
         signal?.throwIfAborted();
 
-        // 消费流式生成器：yield 的是文本增量(实时显示)，done 时的 value 是
-        // 组装好的完整 LLMResponse(后续逻辑照常用它)。abort 会让 fetch 断开，
-        // it.next() 抛出，从而跳出本方法、进入下面的回滚。
+        // 消费流式生成器：yield 是文本增量(实时显示 + 累积供封口)，
+        // done 的 value 是组装好的完整 LLMResponse。
         const it = this.llm.stream(this.history, {
           system: this.system,
           tools: this.tools,
@@ -93,14 +117,14 @@ export class Agent {
         });
         let chunk = await it.next();
         while (!chunk.done) {
+          partialText += chunk.value;
           this.onTextDelta?.(chunk.value);
           chunk = await it.next();
         }
         const res = chunk.value;
         signal?.throwIfAborted();
 
-        // 被 max_tokens 截断 => 这次输出是残缺的（文本没写完，或工具调用的
-        // 参数 JSON 被截断）。继续喂回去只会让循环空转，直接报清楚错。
+        // 被 max_tokens 截断 => 这次输出是残缺的，直接报清楚错。
         if (res.stopReason === "max_tokens") {
           throw new Error(
             "输出被 max_tokens 截断（内容或工具调用参数未生成完整）。" +
@@ -112,43 +136,61 @@ export class Agent {
           (b): b is ToolUseBlock => b.type === "tool_use",
         );
 
-        // 没有工具调用 => 这就是最终答复，结束循环。
-        // 纯文本回复存成字符串，让历史更直观（与无工具场景保持一致）。
+        // 没有工具调用 => 最终答复。纯文本存成字符串，更直观。
         if (toolUses.length === 0) {
           const text = this.extractText(res.content);
-          this.history.push({ role: "assistant", content: text });
+          commit({ role: "assistant", content: text });
+          this.onTurnComplete?.(added);
           return text;
         }
 
-        // 有工具调用 => 完整存下这一步的内容块（含 tool_use，结果要靠它的 id 对应）。
-        this.history.push({ role: "assistant", content: res.content });
+        // 有工具调用 => 完整存下这一步内容块（含 tool_use，结果靠 id 对应）。
+        commit({ role: "assistant", content: res.content });
 
-        // 逐个执行工具，把结果收集成一条 user 消息（tool_result 块数组）。
-        // TODO: 把 signal 也传进 tool.run，让执行中的慢命令/请求本身可被中断。
-        const results: ToolResultBlock[] = [];
+        // 进入工具阶段：逐个执行，结果收集成一条 user 消息（tool_result 数组）。
+        pendingToolUses = toolUses;
+        pendingResults = [];
         for (const call of toolUses) {
           signal?.throwIfAborted();
           this.onToolCall?.({ name: call.name, input: call.input });
           const { content, isError } = await this.runTool(call, signal);
           this.onToolResult?.({ name: call.name, content, isError });
-          results.push({
+          pendingResults.push({
             type: "tool_result",
             tool_use_id: call.id,
             content,
             is_error: isError,
           });
         }
-        this.history.push({ role: "user", content: results });
+        commit({ role: "user", content: pendingResults });
+        pendingToolUses = null;
         // 继续下一轮：模型这次能看到工具结果，再决定下一步。
       }
 
       throw new Error(`超过最大工具调用步数（${this.maxSteps}），可能陷入循环`);
     } catch (err) {
-      // 被中断 => 整轮回滚：把从 userMsg 起新增的所有消息删掉，
-      // 历史恢复到发送前的样子（永远合法，不留孤儿 tool_use）。
+      // 用户中断 => 封口成合法状态并落盘；非中断错误不封口，原样抛出。
       if (signal?.aborted) {
-        const i = this.history.indexOf(userMsg);
-        if (i >= 0) this.history.length = i;
+        if (pendingToolUses) {
+          // 工具阶段被中断：给未完成的 tool_use 补一条取消结果（业界标准，
+          // 保证每个 tool_use 都配对，历史合法、恢复后可正常参与压缩）。
+          const done = new Set(pendingResults.map((r) => r.tool_use_id));
+          for (const call of pendingToolUses) {
+            if (!done.has(call.id)) {
+              pendingResults.push({
+                type: "tool_result",
+                tool_use_id: call.id,
+                content: "[已被用户中断]",
+                is_error: true,
+              });
+            }
+          }
+          commit({ role: "user", content: pendingResults });
+        } else if (partialText) {
+          // 流式阶段被中断：把已流出的半截文本留下（= ChatGPT 的“停止”）。
+          commit({ role: "assistant", content: partialText });
+        }
+        this.onTurnComplete?.(added);
       }
       throw err;
     }

@@ -1,6 +1,12 @@
 import * as readline from "node:readline";
 import { Agent } from "./agent";
 import { AnthropicLLM } from "./llm";
+import {
+  appendMessages,
+  listSessions,
+  loadSession,
+  newSessionId,
+} from "./session";
 import { defaultTools } from "./tools";
 
 // 命令行入口：把 agent 循环包进一个 REPL。
@@ -17,9 +23,15 @@ async function main() {
           `${(delayMs / 1000).toFixed(1)}s 后重试 (${attempt}/${maxRetries})`,
       ),
   });
+  // 会话 id：启动带参 = 续聊该会话；不带 = 新建。/new 会换成新 id。
+  // onTurnComplete 闭包读取的是 sessionId 这个 let 变量的“当前值”，所以 /new 后能切到新文件。
+  let sessionId = process.argv[2] ?? newSessionId();
+
   const agent = new Agent(llm, {
     system:
       "你是一个简洁、友好的中文助手。可以使用工具来获取实时信息、读写文件、发起 HTTP 请求或执行 shell 命令。",
+    // 每轮的消息提交到历史时追加落盘（append-only）。
+    onTurnComplete: (added) => appendMessages(sessionId, added),
     // defaultTools 含 shell，模型可自动执行任意命令。若有顾虑，可改成
     // tools: defaultTools.filter((t) => t.name !== "shell") 把 shell 摘掉。
     tools: defaultTools,
@@ -38,7 +50,22 @@ async function main() {
       ),
   });
 
-  console.log("简易对话 Agent 已启动。输入 /exit 退出，/reset 重置对话。\n");
+  // 续聊：启动带了 sessionId 且磁盘有记录 → 灌进内存接着聊。
+  if (process.argv[2]) {
+    const prior = loadSession(sessionId);
+    if (prior.length) {
+      agent.loadHistory(prior);
+      console.log(`已恢复会话 ${sessionId}（${prior.length} 条消息）`);
+    } else {
+      console.log(`会话 ${sessionId} 暂无记录，作为新会话开始`);
+    }
+  } else {
+    console.log(`新会话 ${sessionId}`);
+  }
+
+  console.log(
+    "命令：/exit 退出 · /reset 清空当前对话 · /sessions 列出会话 · /new 开新会话\n",
+  );
 
   const rl = readline.createInterface({
     input: process.stdin,
@@ -64,6 +91,28 @@ async function main() {
     if (text === "/reset") {
       agent.reset();
       console.log("（已清空对话历史）\n");
+      rl.prompt();
+      continue;
+    }
+    if (text === "/sessions") {
+      const list = listSessions();
+      if (!list.length) console.log("（暂无会话）\n");
+      else {
+        for (const s of list) {
+          const cur = s.id === sessionId ? " ←当前" : "";
+          console.log(
+            `  ${s.id}  ${s.updatedAt.toLocaleString()}  ${s.preview.slice(0, 20)}${cur}`,
+          );
+        }
+        console.log(`\n（续聊某会话：重启时 bun run src/cli.ts <id>）\n`);
+      }
+      rl.prompt();
+      continue;
+    }
+    if (text === "/new") {
+      sessionId = newSessionId();
+      agent.reset();
+      console.log(`已开新会话 ${sessionId}\n`);
       rl.prompt();
       continue;
     }
