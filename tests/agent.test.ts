@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { Agent } from "../src/agent";
+import type { Tool } from "../src/types";
 import { FakeLLM } from "./fake-llm";
 
 describe("Agent 对话循环", () => {
@@ -72,5 +73,169 @@ describe("Agent 对话循环", () => {
     h.push({ role: "user", content: "篡改" });
 
     expect(agent.getHistory()).toHaveLength(2);
+  });
+});
+
+describe("Agent 工具调用循环", () => {
+  // 一个加法工具，记录被调用的参数，便于断言。
+  function makeAddTool(): { tool: Tool; calls: unknown[] } {
+    const calls: unknown[] = [];
+    const tool: Tool = {
+      name: "add",
+      description: "把两个数相加",
+      inputSchema: {
+        type: "object",
+        properties: { a: { type: "number" }, b: { type: "number" } },
+        required: ["a", "b"],
+      },
+      run: (input) => {
+        calls.push(input);
+        return String((input.a as number) + (input.b as number));
+      },
+    };
+    return { tool, calls };
+  }
+
+  test("模型请求工具 -> 执行 -> 结果喂回 -> 得到最终答复", async () => {
+    const { tool, calls } = makeAddTool();
+    let step = 0;
+    const llm = new FakeLLM(() => {
+      step++;
+      // 第一次：要求调用 add(2,3)；第二次：给出最终文本。
+      if (step === 1) {
+        return {
+          stopReason: "tool_use",
+          content: [
+            { type: "tool_use", id: "t1", name: "add", input: { a: 2, b: 3 } },
+          ],
+        };
+      }
+      return { stopReason: "end_turn", content: [{ type: "text", text: "等于 5" }] };
+    });
+    const agent = new Agent(llm, { tools: [tool] });
+
+    const reply = await agent.send("2+3 等于几");
+
+    expect(reply).toBe("等于 5");
+    expect(calls).toEqual([{ a: 2, b: 3 }]);
+
+    // 历史应为：user / assistant(tool_use) / user(tool_result) / assistant(text)
+    const history = agent.getHistory();
+    expect(history).toHaveLength(4);
+    expect(history[1]!.content).toEqual([
+      { type: "tool_use", id: "t1", name: "add", input: { a: 2, b: 3 } },
+    ]);
+    expect(history[2]!.content).toEqual([
+      { type: "tool_result", tool_use_id: "t1", content: "5", is_error: false },
+    ]);
+
+    // 第二次调模型时，能看到工具结果（让 agent “知道之前每一步发生了什么”）。
+    expect(llm.calls[1]!.messages).toHaveLength(3);
+  });
+
+  test("未知工具返回 is_error 结果块，并把错误喂回模型", async () => {
+    let step = 0;
+    const llm = new FakeLLM(() => {
+      step++;
+      if (step === 1) {
+        return {
+          stopReason: "tool_use",
+          content: [
+            { type: "tool_use", id: "x", name: "不存在", input: {} },
+          ],
+        };
+      }
+      return { stopReason: "end_turn", content: [{ type: "text", text: "抱歉" }] };
+    });
+    const agent = new Agent(llm, { tools: [] });
+
+    const reply = await agent.send("用个工具");
+
+    expect(reply).toBe("抱歉");
+    const history = agent.getHistory();
+    expect(history[2]!.content).toEqual([
+      {
+        type: "tool_result",
+        tool_use_id: "x",
+        content: "未知工具: 不存在",
+        is_error: true,
+      },
+    ]);
+  });
+
+  test("工具抛错被捕获成 is_error，不中断对话", async () => {
+    const tool: Tool = {
+      name: "boom",
+      description: "总是抛错",
+      inputSchema: { type: "object", properties: {} },
+      run: () => {
+        throw new Error("炸了");
+      },
+    };
+    let step = 0;
+    const llm = new FakeLLM(() => {
+      step++;
+      if (step === 1) {
+        return {
+          stopReason: "tool_use",
+          content: [{ type: "tool_use", id: "b", name: "boom", input: {} }],
+        };
+      }
+      return { stopReason: "end_turn", content: [{ type: "text", text: "好的" }] };
+    });
+    const agent = new Agent(llm, { tools: [tool] });
+
+    const reply = await agent.send("调用 boom");
+
+    expect(reply).toBe("好的");
+    const result = agent.getHistory()[2]!.content;
+    expect(result).toEqual([
+      { type: "tool_result", tool_use_id: "b", content: "炸了", is_error: true },
+    ]);
+  });
+
+  test("超过 maxSteps 抛错，防止死循环", async () => {
+    const tool: Tool = {
+      name: "noop",
+      description: "空操作",
+      inputSchema: { type: "object", properties: {} },
+      run: () => "ok",
+    };
+    // 模型永远要求调用工具，触发上限保护。
+    const llm = new FakeLLM(() => ({
+      stopReason: "tool_use",
+      content: [{ type: "tool_use", id: "n", name: "noop", input: {} }],
+    }));
+    const agent = new Agent(llm, { tools: [tool], maxSteps: 3 });
+
+    await expect(agent.send("转圈")).rejects.toThrow(/最大工具调用步数/);
+    expect(llm.calls).toHaveLength(3);
+  });
+
+  test("onToolCall / onToolResult 回调会被触发", async () => {
+    const { tool } = makeAddTool();
+    let step = 0;
+    const llm = new FakeLLM(() => {
+      step++;
+      if (step === 1) {
+        return {
+          stopReason: "tool_use",
+          content: [
+            { type: "tool_use", id: "t1", name: "add", input: { a: 1, b: 1 } },
+          ],
+        };
+      }
+      return { stopReason: "end_turn", content: [{ type: "text", text: "2" }] };
+    });
+    const events: string[] = [];
+    const agent = new Agent(llm, {
+      tools: [tool],
+      onToolCall: ({ name }) => events.push(`call:${name}`),
+      onToolResult: ({ name, content }) => events.push(`result:${name}:${content}`),
+    });
+
+    await agent.send("1+1");
+
+    expect(events).toEqual(["call:add", "result:add:2"]);
   });
 });

@@ -1,4 +1,10 @@
-import type { LLM, Message } from "./types";
+import type {
+  CompleteOptions,
+  ContentBlock,
+  LLM,
+  LLMResponse,
+  Message,
+} from "./types";
 
 export interface AnthropicLLMOptions {
   apiKey?: string;
@@ -56,7 +62,11 @@ export class AnthropicLLM implements LLM {
     return headers;
   }
 
-  async complete(messages: Message[], system?: string): Promise<string> {
+  async complete(
+    messages: Message[],
+    opts: CompleteOptions = {},
+  ): Promise<LLMResponse> {
+    const { system, tools } = opts;
     const res = await fetch(`${this.baseUrl}/v1/messages`, {
       method: "POST",
       headers: this.buildHeaders(),
@@ -64,6 +74,17 @@ export class AnthropicLLM implements LLM {
         model: this.model,
         max_tokens: this.maxTokens,
         ...(system ? { system } : {}),
+        // 把工具的「说明书」传给模型（run 是本地逻辑，不发给 API）。
+        ...(tools && tools.length
+          ? {
+              tools: tools.map((t) => ({
+                name: t.name,
+                description: t.description,
+                input_schema: t.inputSchema,
+              })),
+            }
+          : {}),
+        // content 直接透传：字符串或内容块数组（含 tool_use / tool_result）都合法。
         messages: messages.map((m) => ({ role: m.role, content: m.content })),
       }),
     });
@@ -74,13 +95,15 @@ export class AnthropicLLM implements LLM {
     }
 
     const data = (await res.json()) as {
-      content: Array<{ type: string; text?: string }>;
+      stop_reason: string;
+      content: ContentBlock[];
     };
 
-    // 响应 content 是一个数组，把所有 text 块拼起来即可。
-    return data.content
-      .filter((b) => b.type === "text" && typeof b.text === "string")
-      .map((b) => b.text)
-      .join("");
+    // 把 stop_reason 和原始内容块（text / tool_use）交给上层。
+    // 上层据 stop_reason 判断是否还要执行工具、继续循环。
+    return {
+      stopReason: data.stop_reason,
+      content: data.content,
+    };
   }
 }

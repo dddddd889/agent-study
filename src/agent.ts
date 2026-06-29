@@ -1,27 +1,119 @@
-import type { LLM, Message } from "./types";
+import type {
+  ContentBlock,
+  LLM,
+  Message,
+  TextBlock,
+  Tool,
+  ToolResultBlock,
+  ToolUseBlock,
+} from "./types";
 
 export interface AgentOptions {
   system?: string;
+  tools?: Tool[];
+  // 工具循环的最大步数，防止模型反复要工具陷入死循环。默认 10。
+  maxSteps?: number;
+  // 可选事件回调，便于 CLI 展示「正在调用工具 / 工具结果」等过程。
+  onToolCall?: (call: { name: string; input: Record<string, unknown> }) => void;
+  onToolResult?: (result: {
+    name: string;
+    content: string;
+    isError: boolean;
+  }) => void;
 }
 
-// 最简对话 Agent：维护一段对话历史，每轮把用户输入追加进去，
-// 调用 LLM 得到回复，再把回复追加回历史，从而实现“多轮记忆”。
+// 带工具调用循环的 Agent。
+// 相比最简对话循环，核心变化是：send() 不再「一问一答」，而是一个循环——
+// 调模型 -> 若模型要用工具就执行 -> 把结果喂回历史 -> 再调模型 -> ...
+// 直到模型不再要工具、给出最终答复。历史里会完整累积每一步的
+// tool_use 和 tool_result，所以模型始终“知道之前每一步发生了什么”。
 export class Agent {
   private llm: LLM;
   private system?: string;
+  private tools: Tool[];
+  private maxSteps: number;
+  private onToolCall?: AgentOptions["onToolCall"];
+  private onToolResult?: AgentOptions["onToolResult"];
   private history: Message[] = [];
 
   constructor(llm: LLM, opts: AgentOptions = {}) {
     this.llm = llm;
     this.system = opts.system;
+    this.tools = opts.tools ?? [];
+    this.maxSteps = opts.maxSteps ?? 10;
+    this.onToolCall = opts.onToolCall;
+    this.onToolResult = opts.onToolResult;
   }
 
-  // 这就是 agent 循环的“一轮”：输入一句话 -> 拿到一句回复。
+  // 一轮对话（内部可能包含多步工具调用），返回最终的文本回复。
   async send(userInput: string): Promise<string> {
     this.history.push({ role: "user", content: userInput });
-    const reply = await this.llm.complete(this.history, this.system);
-    this.history.push({ role: "assistant", content: reply });
-    return reply;
+
+    // agent 循环：每次迭代 = 调一次模型。
+    for (let step = 0; step < this.maxSteps; step++) {
+      const res = await this.llm.complete(this.history, {
+        system: this.system,
+        tools: this.tools,
+      });
+
+      const toolUses = res.content.filter(
+        (b): b is ToolUseBlock => b.type === "tool_use",
+      );
+
+      // 没有工具调用 => 这就是最终答复，结束循环。
+      // 纯文本回复存成字符串，让历史更直观（与无工具场景保持一致）。
+      if (toolUses.length === 0) {
+        const text = this.extractText(res.content);
+        this.history.push({ role: "assistant", content: text });
+        return text;
+      }
+
+      // 有工具调用 => 完整存下这一步的内容块（含 tool_use，结果要靠它的 id 对应）。
+      this.history.push({ role: "assistant", content: res.content });
+
+      // 逐个执行工具，把结果收集成一条 user 消息（tool_result 块数组）。
+      const results: ToolResultBlock[] = [];
+      for (const call of toolUses) {
+        this.onToolCall?.({ name: call.name, input: call.input });
+        const { content, isError } = await this.runTool(call);
+        this.onToolResult?.({ name: call.name, content, isError });
+        results.push({
+          type: "tool_result",
+          tool_use_id: call.id,
+          content,
+          is_error: isError,
+        });
+      }
+      this.history.push({ role: "user", content: results });
+      // 继续下一轮：模型这次能看到工具结果，再决定下一步。
+    }
+
+    throw new Error(`超过最大工具调用步数（${this.maxSteps}），可能陷入循环`);
+  }
+
+  // 执行单个工具调用，永远返回文本结果；出错也转成 is_error 结果块，
+  // 让模型能看到错误信息并自行纠正，而不是直接抛断对话。
+  private async runTool(
+    call: ToolUseBlock,
+  ): Promise<{ content: string; isError: boolean }> {
+    const tool = this.tools.find((t) => t.name === call.name);
+    if (!tool) {
+      return { content: `未知工具: ${call.name}`, isError: true };
+    }
+    try {
+      const out = await tool.run(call.input);
+      return { content: String(out), isError: false };
+    } catch (err) {
+      return { content: (err as Error).message, isError: true };
+    }
+  }
+
+  // 从内容块里抽取纯文本并拼接，作为最终回复字符串。
+  private extractText(content: ContentBlock[]): string {
+    return content
+      .filter((b): b is TextBlock => b.type === "text")
+      .map((b) => b.text)
+      .join("");
   }
 
   // 返回历史副本，避免外部直接改内部数组。
