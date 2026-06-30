@@ -44,6 +44,26 @@ describe("MCP stdio(真起 mock server 子进程)", () => {
     await close();
   });
 
+  test("多 server 并行连接:墙钟≈最慢的一个,而非求和", async () => {
+    // 两个各延迟 300ms 启动的 server。串行连 ≈600ms,并行 ≈300ms。
+    const slow = {
+      command: "bun",
+      args: ["run", "tests/mock-mcp-server.ts"],
+      env: { MOCK_DELAY_MS: "300" },
+    };
+    useConfig({ a: slow, b: slow });
+
+    const t0 = Date.now();
+    const { servers, close } = await loadMcpTools();
+    const elapsed = Date.now() - t0;
+
+    expect(servers.map((s) => s.name)).toEqual(["a", "b"]); // 排序稳定
+    expect(servers.every((s) => s.ok)).toBe(true);
+    expect(elapsed).toBeLessThan(550); // 并行:远小于串行的 ~600ms
+
+    await close();
+  });
+
   test("server 起不来 → 跳过、记 error,不抛", async () => {
     useConfig({ bad: { command: "this-command-does-not-exist-xyz", args: [] } });
     const { tools, servers, close } = await loadMcpTools();

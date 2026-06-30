@@ -17,14 +17,19 @@ function reply(id: number, result: unknown) {
   process.stdout.write(JSON.stringify({ jsonrpc: "2.0", id, result }) + "\n");
 }
 
+// 可选启动延迟(毫秒):测试并行加载用 —— 延迟 initialize 应答模拟"慢 server"。
+const DELAY_MS = Number(process.env.MOCK_DELAY_MS) || 0;
+
 function handle(msg: { id?: number; method: string; params?: any }) {
   switch (msg.method) {
     case "initialize":
-      reply(msg.id!, {
-        protocolVersion: "2024-11-05",
-        capabilities: {},
-        serverInfo: { name: "mock", version: "1.0" },
-      });
+      setTimeout(() => {
+        reply(msg.id!, {
+          protocolVersion: "2024-11-05",
+          capabilities: {},
+          serverInfo: { name: "mock", version: "1.0" },
+        });
+      }, DELAY_MS);
       break;
     case "notifications/initialized":
       break; // 通知，无响应

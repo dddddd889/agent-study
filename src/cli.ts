@@ -1,3 +1,4 @@
+import { existsSync } from "node:fs";
 import * as readline from "node:readline";
 import { Agent } from "./agent";
 import { AnthropicLLM } from "./llm";
@@ -72,6 +73,16 @@ async function main() {
       rl.question(q, { signal }, (answer) => settle(answer));
     });
 
+  // prompt(提示符)= readline 等输入时打印在行首的那串文字,这里就是 `你 > `。
+  // 后台输出(如 MCP 就绪概况)是直接往终端写字符,会糊在用户正敲的 `你 >` 行上、冲乱它;
+  // 打印完调 rl.prompt(true) 把提示符重画一遍 —— preserveCursor=true 连同已敲的半行内容
+  // 一起保留(不清屏、不丢输入),终端保持整洁。
+  // 仅在空闲时重画:回合中(模型回复 / 审批弹问)提示符不是 "你 >",别插手。
+  const redrawPrompt = () => {
+    if (currentAbort) return;
+    rl.prompt(true);
+  };
+
   // Ctrl+C：回合中 => 中断本轮；空闲 => 关闭 rl（ask 返回 null → 退出）。
   // 不能在回合期间 rl.pause()，否则 readline 读不到 Ctrl+C 按键。
   rl.on("SIGINT", () => {
@@ -79,8 +90,13 @@ async function main() {
     else rl.close();
   });
 
-  // MCP:连接 .mcp.json 里的外部 server,把它们的工具合并进来。
-  let mcp = await loadMcpTools();
+  // MCP:在【后台】连接 .mcp.json 里的 server,不阻塞 REPL 启动。
+  // mcp 句柄初始为空,连好后替换 + setTools;mcpReady 跟踪后台加载,供 /exit 等待。
+  let mcp: Awaited<ReturnType<typeof loadMcpTools>> = {
+    tools: [],
+    close: async () => {},
+    servers: [],
+  };
   const printMcp = (servers: McpServerInfo[]) => {
     if (!servers.length) {
       console.log("（无 MCP server；在 .mcp.json 配置 mcpServers 后用 /mcp reload 加载）");
@@ -96,7 +112,6 @@ async function main() {
       );
     }
   };
-  if (mcp.servers.length) printMcp(mcp.servers);
 
   const agent = new Agent(llm, {
     system,
@@ -130,6 +145,28 @@ async function main() {
           return c === "y" ? "once" : c === "a" ? "always" : "deny";
         },
   });
+
+  // MCP 后台加载:不阻塞 REPL。连好后替换句柄 + setTools + 打印就绪概况。
+  // mcpReady 跟踪在飞的加载(供 /exit、/mcp reload 等待);mcpLoaded 标记是否已就绪。
+  const mcpConfigured = existsSync(process.env.AGENT_MCP_CONFIG ?? ".mcp.json");
+  let mcpReady: Promise<void> = Promise.resolve();
+  let mcpLoaded = !mcpConfigured;
+  const loadMcp = () => {
+    mcpReady = loadMcpTools()
+      .then((h) => {
+        mcp = h;
+        mcpLoaded = true;
+        agent.setTools([...defaultTools, ...mcp.tools]);
+        if (h.servers.length) {
+          process.stdout.write("\n  · MCP 已就绪：\n");
+          printMcp(h.servers);
+          redrawPrompt(); // 概况打印完,重新亮出 `你 >`(含已敲内容)
+        }
+      })
+      .catch(() => {
+        mcpLoaded = true;
+      });
+  };
 
   // 长期记忆：每轮后【后台】更新，不阻塞主对话。
   // 单飞(running 防重叠)+ 吞错(后台失败不影响对话)；退出时 flush。
@@ -170,8 +207,13 @@ async function main() {
   }
 
   console.log(
-    "命令：/exit · /reset · /sessions · /new · /context · /memory · /mcp [reload]\n",
+    "命令：/exit · /reset · /sessions · /new · /context · /memory · /mcp [reload]",
   );
+
+  // 提示符已可立即出现;MCP 在后台连(连好再打印就绪概况、再可用)。
+  if (mcpConfigured) console.log("· MCP 连接中…(后台)");
+  console.log("");
+  loadMcp();
 
   while (true) {
     const line = await ask("你 > ");
@@ -217,11 +259,13 @@ async function main() {
       continue;
     }
     if (text === "/mcp") {
-      printMcp(mcp.servers);
+      if (!mcpLoaded) console.log("MCP 连接中…(后台,稍候)"); // 还没连好
+      else printMcp(mcp.servers);
       console.log("");
       continue;
     }
     if (text === "/mcp reload") {
+      await mcpReady; // 等后台首连结束,避免和 reload 抢句柄
       await mcp.close(); // 关旧连接(kill 子进程 / 关会话)
       mcp = await loadMcpTools(); // 重读 .mcp.json、重连
       agent.setTools([...defaultTools, ...mcp.tools]); // 运行时换工具集
@@ -267,6 +311,7 @@ async function main() {
     }
   }
 
+  await mcpReady; // 后台首连可能还在飞,先等它落定再关,避免漏关子进程
   await mcp.close(); // 关闭所有 MCP 连接(kill 子进程 / 关会话)
   rl.close();
   console.log("\n再见！");

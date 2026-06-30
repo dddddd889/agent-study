@@ -236,30 +236,36 @@ export async function loadMcpTools(): Promise<{
   const closers: Array<() => Promise<void>> = [];
   const servers: McpServerInfo[] = [];
 
-  for (const [name, sc] of Object.entries(cfg)) {
-    const kind: "stdio" | "http" = sc.url ? "http" : "stdio";
-    const transport: Transport = sc.url
-      ? new HttpTransport(sc.url, sc.headers)
-      : new StdioTransport(sc.command ?? "", sc.args ?? [], sc.env);
-    try {
-      await transport.start();
-      const client = new McpClient(transport);
-      await client.initialize();
-      const list = await client.listTools();
-      for (const t of list) tools.push(adapt(name, t, client));
-      closers.push(() => transport.close());
-      servers.push({ name, transport: kind, ok: true, toolNames: list.map((t) => t.name) });
-    } catch (e) {
-      await transport.close().catch(() => {});
-      servers.push({
-        name,
-        transport: kind,
-        ok: false,
-        toolNames: [],
-        error: (e as Error).message,
-      });
-    }
-  }
+  // 并行连接所有 server:墙钟时间 = 最慢的那个,而非求和。
+  // 每个 server 各自 try/catch,坏的跳过、不影响其它。
+  await Promise.all(
+    Object.entries(cfg).map(async ([name, sc]) => {
+      const kind: "stdio" | "http" = sc.url ? "http" : "stdio";
+      const transport: Transport = sc.url
+        ? new HttpTransport(sc.url, sc.headers)
+        : new StdioTransport(sc.command ?? "", sc.args ?? [], sc.env);
+      try {
+        await transport.start();
+        const client = new McpClient(transport);
+        await client.initialize();
+        const list = await client.listTools();
+        for (const t of list) tools.push(adapt(name, t, client));
+        closers.push(() => transport.close());
+        servers.push({ name, transport: kind, ok: true, toolNames: list.map((t) => t.name) });
+      } catch (e) {
+        await transport.close().catch(() => {});
+        servers.push({
+          name,
+          transport: kind,
+          ok: false,
+          toolNames: [],
+          error: (e as Error).message,
+        });
+      }
+    }),
+  );
+  // 并行完成的顺序不定,按 server 名排个序,概况稳定。
+  servers.sort((a, b) => a.name.localeCompare(b.name));
 
   return {
     tools,

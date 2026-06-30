@@ -50,13 +50,22 @@ MCP 是 **JSON-RPC 2.0** 协议。客户端连上 server 后:
 
 ## 生命周期 + 可观测 + 热重载([src/cli.ts](../src/cli.ts))
 
-- **启动**:`loadMcpTools()` 连接、合并工具、打印概况;**某个 server 起不来就跳过**(记 error),不影响其它和启动。
-- **`/mcp`**:查看各 server 状态 + 暴露的工具(可观测)。
-- **`/mcp reload`**:`close()` 关旧连接 → 重读 `.mcp.json` 重连 → **`agent.setTools([...defaultTools, ...mcp.tools])`** 运行时换工具集(改了配置/加了 server 不用重启)。这是本步唯一动 `Agent` 的地方(新增 `setTools`)。
-- **退出**:`close()` kill 所有子进程 / 关会话。
+**启动不阻塞**:连 MCP 要等子进程冷启(`npx` 拉包可达数秒)/远端握手,若同步 `await` 就把提示符卡住了。所以:
+
+- **后台连**:提示符**立刻**出现(`你 >` 秒出);`loadMcpTools()` 不 `await`,放进一个 `mcpReady` promise 里在后台跑。初始 `mcp` 句柄为空(`tools:[]`),连好后回调里替换句柄 + **`agent.setTools([...defaultTools, ...mcp.tools]))`** 把工具挂上,再打印就绪概况。连接期间本地工具已可用,只是 MCP 工具稍后才到。
+- **并行连**([src/mcp.ts](../src/mcp.ts) 里 `Promise.all`):多个 server 同时连,墙钟 = 最慢的那个,而非求和。每个 server 各自 `try/catch`,**坏的跳过**(记 error),不影响其它和启动。
+- **`/mcp`**:查看各 server 状态 + 暴露的工具(可观测);还没连好就提示"连接中…"。
+- **`/mcp reload`**:先 `await mcpReady`(别和后台首连抢句柄)→ `close()` 关旧连接 → 重读 `.mcp.json` 重连 → `setTools` 运行时换工具集(改了配置/加了 server 不用重启)。这是本步唯一动 `Agent` 的地方(新增 `setTools`)。
+- **退出**:先 `await mcpReady`(后台首连可能还在飞,等它落定免得漏关)→ `close()` kill 所有子进程 / 关会话。
+
+> 取舍:就绪概况是后台打印的,可能和你正在敲的那行 `你 >` 轻微交错 —— 换来的是"提示符秒出",值。
 
 ```
-mock (stdio) ✓  1 个工具: echo      ← 启动/​/mcp 概况
+· MCP 连接中…(后台)
+你 >                                  ← 提示符立刻可用(不等 MCP)
+
+  · MCP 已就绪:                       ← 后台连好后才打印(可能和你正敲的行轻微交错)
+  mock (stdio) ✓  1 个工具: mock__echo
 你 > 用 mock__echo 工具回显 hello-mcp
   · 调用工具 mock__echo({"text":"hello-mcp"})
   · mock__echo 结果：echo: hello-mcp
@@ -66,6 +75,7 @@ mock (stdio) ✓  1 个工具: echo      ← 启动/​/mcp 概况
 
 - [tests/mcp.test.ts](../tests/mcp.test.ts) + [tests/mock-mcp-server.ts](../tests/mock-mcp-server.ts):
   - **stdio 集成**:真起一个极小 mock MCP server 子进程,验证 `initialize → tools/list → 适配(前缀+dangerous)→ tools/call` 往返;
+  - **并行加载**:两个各延迟 300ms 启动的 server,验证墙钟 < 550ms(并行,而非串行的 ~600ms);
   - **坏 server**:命令不存在 → 跳过、记 error、不抛;
   - **HTTP**:mock `fetch` 验证 POST 发请求、JSON 响应、适配 + 调用。
 - 端到端用 PTY 实测过(上面那段)。
