@@ -1,6 +1,7 @@
 import * as readline from "node:readline";
 import { Agent } from "./agent";
 import { AnthropicLLM } from "./llm";
+import { extractMemory, readMemory, writeMemory } from "./memory";
 import {
   appendMessages,
   listSessions,
@@ -30,6 +31,12 @@ async function main() {
   // 放行模式：AGENT_ALLOW_ALL=1 时危险工具自动允许、不弹问。
   // 仅供本地无人值守等场景，慎用 —— shell 会裸跑任意命令。
   const allowAll = process.env.AGENT_ALLOW_ALL === "1";
+
+  // 长期记忆：会话开始时把 .memory.md 注入系统提示（跨会话沉淀的事实/偏好/决定）。
+  const baseSystem =
+    "你是一个简洁、友好的中文助手。可以使用工具来获取实时信息、读写文件、发起 HTTP 请求或执行 shell 命令。";
+  const memory = readMemory();
+  const system = memory ? `${baseSystem}\n\n[长期记忆]\n${memory}` : baseSystem;
 
   const rl = readline.createInterface({
     input: process.stdin,
@@ -72,8 +79,7 @@ async function main() {
   });
 
   const agent = new Agent(llm, {
-    system:
-      "你是一个简洁、友好的中文助手。可以使用工具来获取实时信息、读写文件、发起 HTTP 请求或执行 shell 命令。",
+    system,
     // 每轮的消息提交到历史时追加落盘（append-only）。
     onTurnComplete: (added) => appendMessages(sessionId, added),
     // 上下文软上限：默认 100000；设 AGENT_MAX_CONTEXT_TOKENS 调小可观察压缩(摘要)。
@@ -105,6 +111,25 @@ async function main() {
         },
   });
 
+  // 长期记忆：每轮后【后台】更新，不阻塞主对话。
+  // 单飞(running 防重叠)+ 吞错(后台失败不影响对话)；退出时 flush。
+  let memoryRunning = false;
+  let lastMemoryRun: Promise<void> = Promise.resolve();
+  const updateMemory = () => {
+    if (memoryRunning) return; // 单飞：一次没跑完不重叠;下次读全量历史会补上
+    memoryRunning = true;
+    lastMemoryRun = (async () => {
+      try {
+        const next = await extractMemory(llm, agent.getHistory(), readMemory());
+        if (next) writeMemory(next); // 空结果不覆盖,避免清空记忆
+      } catch {
+        // 后台失败：静默,不影响主对话
+      } finally {
+        memoryRunning = false;
+      }
+    })();
+  };
+
   // 续聊：启动带了 sessionId 且磁盘有记录 → 灌进内存接着聊。
   if (process.argv[2]) {
     const prior = loadSession(sessionId);
@@ -125,7 +150,7 @@ async function main() {
   }
 
   console.log(
-    "命令：/exit 退出 · /reset 清空 · /sessions 列出会话 · /new 开新会话 · /context 看上下文\n",
+    "命令：/exit · /reset 清空 · /sessions · /new · /context 看上下文 · /memory 看长期记忆\n",
   );
 
   while (true) {
@@ -166,6 +191,11 @@ async function main() {
       );
       continue;
     }
+    if (text === "/memory") {
+      const m = readMemory();
+      console.log(m ? `[长期记忆]\n${m}\n` : "(暂无长期记忆)\n");
+      continue;
+    }
     if (text === "") continue;
 
     currentAbort = new AbortController();
@@ -185,6 +215,21 @@ async function main() {
       }
     } finally {
       currentAbort = null;
+    }
+
+    // 一轮结束：后台更新长期记忆，不 await（不阻塞下一句输入）。
+    updateMemory();
+  }
+
+  // 退出前 flush：等在飞的记忆更新，再补跑一次以纳入最后一轮（尽力而为）。
+  await lastMemoryRun;
+  if (agent.getHistory().length > 0) {
+    process.stdout.write("正在保存长期记忆…\n");
+    try {
+      const next = await extractMemory(llm, agent.getHistory(), readMemory());
+      if (next) writeMemory(next);
+    } catch {
+      // 退出时记忆保存失败：忽略
     }
   }
 
