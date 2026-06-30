@@ -2,6 +2,7 @@ import { exec } from "node:child_process";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { dirname } from "node:path";
 import { promisify } from "node:util";
+import { todoWriteTool } from "./todo";
 import type { Tool } from "./types";
 
 const execAsync = promisify(exec);
@@ -249,4 +250,5 @@ export const defaultTools: Tool[] = [
   writeFileTool,
   httpRequestTool,
   shellTool,
+  todoWriteTool, // 第14步:任务规划(无状态 todo 清单,见 src/todo.ts)
 ];

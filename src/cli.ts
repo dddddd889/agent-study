@@ -10,6 +10,7 @@ import {
   loadSession,
   newSessionId,
 } from "./session";
+import { latestTodos, renderTodos } from "./todo";
 import { defaultTools } from "./tools";
 
 // 命令行入口：把 agent 循环包进一个 REPL。
@@ -35,8 +36,12 @@ async function main() {
   const allowAll = process.env.AGENT_ALLOW_ALL === "1";
 
   // 长期记忆：会话开始时把 .memory.md 注入系统提示（跨会话沉淀的事实/偏好/决定）。
+  // 末段是第14步的【规划引导】:规划能力主要来自这段提示 + todo_write 工具(见 docs/14)。
   const baseSystem =
-    "你是一个简洁、友好的中文助手。可以使用工具来获取实时信息、读写文件、发起 HTTP 请求或执行 shell 命令。";
+    "你是一个简洁、友好的中文助手。可以使用工具来获取实时信息、读写文件、发起 HTTP 请求或执行 shell 命令。\n\n" +
+    "处理需要多步骤的任务时,先用 todo_write 把目标拆成清单再动手;" +
+    "每开始一项就把它标为 in_progress、做完立刻标 completed,同一时刻最多一项 in_progress;" +
+    "计划有变就重发完整清单。简单的一两步任务不必用。";
   const memory = readMemory();
   const system = memory ? `${baseSystem}\n\n[长期记忆]\n${memory}` : baseSystem;
 
@@ -119,6 +124,8 @@ async function main() {
     onTurnComplete: (added) => appendMessages(sessionId, added),
     // 上下文软上限：默认 100000；设 AGENT_MAX_CONTEXT_TOKENS 调小可观察压缩(摘要)。
     maxContextTokens: Number(process.env.AGENT_MAX_CONTEXT_TOKENS) || undefined,
+    // 干活步数上限：默认 10(辅助工具如 todo 不计入)；大任务用 AGENT_MAX_STEPS 调大。
+    maxSteps: Number(process.env.AGENT_MAX_STEPS) || undefined,
     // 本地工具 + MCP 外部工具(都含危险工具；执行前走 onApprove 人工确认)。
     tools: [...defaultTools, ...mcp.tools],
     // 模型回复的文本增量，边生成边裸写到终端（不加换行）。
@@ -207,7 +214,7 @@ async function main() {
   }
 
   console.log(
-    "命令：/exit · /reset · /sessions · /new · /context · /memory · /mcp [reload]",
+    "命令：/exit · /reset · /sessions · /new · /context · /memory · /todo · /mcp [reload]",
   );
 
   // 提示符已可立即出现;MCP 在后台连(连好再打印就绪概况、再可用)。
@@ -256,6 +263,12 @@ async function main() {
     if (text === "/memory") {
       const m = readMemory();
       console.log(m ? `[长期记忆]\n${m}\n` : "(暂无长期记忆)\n");
+      continue;
+    }
+    if (text === "/todo") {
+      // 当前清单从历史解析(唯一真相 = history),和模型看到的是同一份。
+      const todos = latestTodos(agent.getHistory());
+      console.log(todos.length ? `[当前任务]\n${renderTodos(todos)}\n` : "(暂无任务清单)\n");
       continue;
     }
     if (text === "/mcp") {

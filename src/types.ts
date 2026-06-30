@@ -51,6 +51,9 @@ export interface Tool {
   description: string; // 写清楚“什么时候用它”，模型据此决定是否调用
   // 危险工具（碰文件系统 / 网络 / 进程）执行前需人工确认；纯计算工具为 false/省略。
   dangerous?: boolean;
+  // 辅助工具（如 todo 记账）：本身不推进任务,调用它【不计入 maxSteps 步数预算】。
+  // 否则「每步都更新 todo」会蚕食步数,让真正干活 + 收尾挤不进上限。见 docs/14。
+  auxiliary?: boolean;
   // JSON Schema，描述参数结构，模型据此生成 input。
   inputSchema: Record<string, unknown>;
   // 实际执行：拿到模型给的参数（和可选上下文），返回文本结果（可异步）。

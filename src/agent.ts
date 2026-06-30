@@ -22,7 +22,8 @@ const SUMMARY_SYSTEM = "你是对话摘要器，只输出摘要正文，不要�
 export interface AgentOptions {
   system?: string;
   tools?: Tool[];
-  // 工具循环的最大步数，防止模型反复要工具陷入死循环。默认 10。
+  // 工具循环里【干活步数】的上限，防止模型反复调工具陷入死循环。默认 10。
+  // 注：辅助工具(tool.auxiliary,如 todo 记账)不计入此预算,见 send() 与 docs/14。
   maxSteps?: number;
   // 上下文管理：历史估算 token 超过此「软目标」时压缩。默认 100000。
   // 想观察压缩效果，把它调小（如 500）即可。注意是软目标 —— 压不到也只尽力而为。
@@ -131,7 +132,13 @@ export class Agent {
 
     try {
       // agent 循环：每次迭代 = 调一次模型。
-      for (let step = 0; step < this.maxSteps; step++) {
+      // 「干活」步数 workSteps 受 maxSteps 约束;但【辅助工具】(tool.auxiliary,如 todo
+      // 记账)不计入预算 —— 否则「每步都更新 todo」会蚕食步数,让真正干活 + 收尾挤不进
+      // 上限(见 docs/14)。另设硬上限 hardLimit(= maxSteps×3),防止模型只调辅助工具
+      // 空转死循环(辅助工具不涨 workSteps,光靠它循环不会停)。
+      let workSteps = 0;
+      const hardLimit = this.maxSteps * 3;
+      for (let iter = 0; iter < hardLimit && workSteps < this.maxSteps; iter++) {
         partialText = "";
         pendingToolUses = null;
         pendingResults = [];
@@ -210,6 +217,14 @@ export class Agent {
         }
         commit({ role: "user", content: pendingResults });
         pendingToolUses = null;
+
+        // 本轮只要调用了任何【非辅助】工具,就算消耗一个干活步数;
+        // 纯辅助轮(只动了 todo 这类记账工具)不计入预算。
+        // 未知工具(find 不到)按「干活」算,保守不放水。
+        const didWork = toolUses.some(
+          (c) => !this.tools.find((t) => t.name === c.name)?.auxiliary,
+        );
+        if (didWork) workSteps++;
         // 继续下一轮：模型这次能看到工具结果，再决定下一步。
       }
 
