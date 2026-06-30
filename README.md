@@ -1,6 +1,6 @@
 # agent-study · 第 1 步：最简对话循环
 
-> 📈 **本仓库按步骤演进。** 当前代码已实现到 **第 12 步：跨会话长期记忆**。步骤文档：
+> 📈 **本仓库按步骤演进。** 当前代码已实现到 **第 13 步：接入 MCP(外部工具)**。步骤文档：
 >
 > - 第 2 步 · 工具调用循环 → [docs/02-tool-calling-loop.md](docs/02-tool-calling-loop.md)
 > - 第 3 步 · 常用内置工具（文件 / HTTP / Shell）→ [docs/03-builtin-tools.md](docs/03-builtin-tools.md)
@@ -13,6 +13,7 @@
 > - 第 10 步 · 安全控制（危险工具执行前人工确认）→ [docs/10-security-approval.md](docs/10-security-approval.md)
 > - 第 11 步 · 摘要压缩 + 上下文可观测（/context）→ [docs/11-summarization-compaction.md](docs/11-summarization-compaction.md)
 > - 第 12 步 · 跨会话长期记忆（记忆 agent + /memory）→ [docs/12-long-term-memory.md](docs/12-long-term-memory.md)
+> - 第 13 步 · 接入 MCP（外部工具 / .mcp.json / /mcp [reload]）→ [docs/13-mcp.md](docs/13-mcp.md)
 >
 > 本文件介绍的是**第 1 步内核**（最简对话循环）——它仍是理解后续步骤的基础。
 

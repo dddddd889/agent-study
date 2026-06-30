@@ -100,6 +100,11 @@ export class Agent {
     this.history = [...messages];
   }
 
+  // 运行时替换工具集（MCP 热重载用）。
+  setTools(tools: Tool[]): void {
+    this.tools = tools;
+  }
+
   // 一轮对话（内部可能包含多步工具调用），返回最终的文本回复。
   // opts.signal: 中断信号。中断时不再整轮回滚，而是「封口」成合法状态(业界标准)：
   //   - 流式中中断 → 把已流出的半截文本留成 assistant 消息；

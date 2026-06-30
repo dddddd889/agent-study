@@ -2,6 +2,7 @@ import * as readline from "node:readline";
 import { Agent } from "./agent";
 import { AnthropicLLM } from "./llm";
 import { extractMemory, readMemory, writeMemory } from "./memory";
+import { loadMcpTools, type McpServerInfo } from "./mcp";
 import {
   appendMessages,
   listSessions,
@@ -78,14 +79,33 @@ async function main() {
     else rl.close();
   });
 
+  // MCP:连接 .mcp.json 里的外部 server,把它们的工具合并进来。
+  let mcp = await loadMcpTools();
+  const printMcp = (servers: McpServerInfo[]) => {
+    if (!servers.length) {
+      console.log("（无 MCP server；在 .mcp.json 配置 mcpServers 后用 /mcp reload 加载）");
+      return;
+    }
+    for (const s of servers) {
+      // 显示注册给模型的实际名字(带 <server>__ 前缀),和模型调用时一致。
+      const names = s.toolNames.map((t) => `${s.name}__${t}`).join(", ");
+      console.log(
+        s.ok
+          ? `  ${s.name} (${s.transport}) ✓  ${s.toolNames.length} 个工具: ${names}`
+          : `  ${s.name} (${s.transport}) ✗  ${s.error}`,
+      );
+    }
+  };
+  if (mcp.servers.length) printMcp(mcp.servers);
+
   const agent = new Agent(llm, {
     system,
     // 每轮的消息提交到历史时追加落盘（append-only）。
     onTurnComplete: (added) => appendMessages(sessionId, added),
     // 上下文软上限：默认 100000；设 AGENT_MAX_CONTEXT_TOKENS 调小可观察压缩(摘要)。
     maxContextTokens: Number(process.env.AGENT_MAX_CONTEXT_TOKENS) || undefined,
-    // defaultTools 含 shell 等危险工具；执行前会走 onApprove 人工确认。
-    tools: defaultTools,
+    // 本地工具 + MCP 外部工具(都含危险工具；执行前走 onApprove 人工确认)。
+    tools: [...defaultTools, ...mcp.tools],
     // 模型回复的文本增量，边生成边裸写到终端（不加换行）。
     onTextDelta: (text) => process.stdout.write(text),
     // 把工具调用过程打印出来，方便观察 agent 循环里发生了什么。
@@ -150,7 +170,7 @@ async function main() {
   }
 
   console.log(
-    "命令：/exit · /reset 清空 · /sessions · /new · /context 看上下文 · /memory 看长期记忆\n",
+    "命令：/exit · /reset · /sessions · /new · /context · /memory · /mcp [reload]\n",
   );
 
   while (true) {
@@ -196,6 +216,20 @@ async function main() {
       console.log(m ? `[长期记忆]\n${m}\n` : "(暂无长期记忆)\n");
       continue;
     }
+    if (text === "/mcp") {
+      printMcp(mcp.servers);
+      console.log("");
+      continue;
+    }
+    if (text === "/mcp reload") {
+      await mcp.close(); // 关旧连接(kill 子进程 / 关会话)
+      mcp = await loadMcpTools(); // 重读 .mcp.json、重连
+      agent.setTools([...defaultTools, ...mcp.tools]); // 运行时换工具集
+      console.log("已重载 MCP：");
+      printMcp(mcp.servers);
+      console.log("");
+      continue;
+    }
     if (text === "") continue;
 
     currentAbort = new AbortController();
@@ -233,6 +267,7 @@ async function main() {
     }
   }
 
+  await mcp.close(); // 关闭所有 MCP 连接(kill 子进程 / 关会话)
   rl.close();
   console.log("\n再见！");
 }
