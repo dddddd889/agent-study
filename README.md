@@ -116,7 +116,11 @@ AI > 你好小明！很高兴认识你。
 AI > 你叫小明。      ← 证明它记住了上下文
 ```
 
-命令：`/reset` 清空对话历史，`/exit` 退出。
+命令：`/reset` 清空对话历史，`/exit` 退出，`/sessions` 列出会话，`/new` 开新会话。
+
+续聊历史会话：`bun run src/cli.ts <sessionId>`（会话存在 `.sessions/`，惰性创建，跑完一轮才出现）。
+
+危险工具（shell/读写文件/HTTP）默认执行前会**人工确认**；无人值守想全放行用 `AGENT_ALLOW_ALL=1 bun run start`（⚠ 慎用，详见 [docs/10](docs/10-security-approval.md)）。
 
 ## 调试：先跑测试
 

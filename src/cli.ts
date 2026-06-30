@@ -27,6 +27,10 @@ async function main() {
   // onTurnComplete 闭包读取的是 sessionId 这个 let 变量的“当前值”，所以 /new 后能切到新文件。
   let sessionId = process.argv[2] ?? newSessionId();
 
+  // 放行模式：AGENT_ALLOW_ALL=1 时危险工具自动允许、不弹问。
+  // 仅供本地无人值守等场景，慎用 —— shell 会裸跑任意命令。
+  const allowAll = process.env.AGENT_ALLOW_ALL === "1";
+
   const rl = readline.createInterface({
     input: process.stdin,
     output: process.stdout,
@@ -86,14 +90,17 @@ async function main() {
         `\n  · 上下文超限，已遗忘 ${droppedTurns} 轮旧对话（~${beforeTokens} → ~${afterTokens} token）`,
       ),
     // 危险工具执行前弹问；复用 ask()，回合中按 Ctrl+C(abort) → ans 为 null → 当作拒绝。
-    onApprove: async ({ name, input }) => {
-      const ans = await ask(
-        `\n  ⚠ 允许执行 ${name}(${JSON.stringify(input)})? [y]一次 /[a]总是 /[n]拒绝 `,
-        currentAbort?.signal,
-      );
-      const c = (ans ?? "").trim().toLowerCase()[0];
-      return c === "y" ? "once" : c === "a" ? "always" : "deny";
-    },
+    // 放行模式下直接全部允许，不弹问。
+    onApprove: allowAll
+      ? async () => "always"
+      : async ({ name, input }) => {
+          const ans = await ask(
+            `\n  ⚠ 允许执行 ${name}(${JSON.stringify(input)})? [y]一次 /[a]总是 /[n]拒绝 `,
+            currentAbort?.signal,
+          );
+          const c = (ans ?? "").trim().toLowerCase()[0];
+          return c === "y" ? "once" : c === "a" ? "always" : "deny";
+        },
   });
 
   // 续聊：启动带了 sessionId 且磁盘有记录 → 灌进内存接着聊。
@@ -107,6 +114,12 @@ async function main() {
     }
   } else {
     console.log(`新会话 ${sessionId}`);
+  }
+
+  if (allowAll) {
+    console.log(
+      "⚠ 放行模式(AGENT_ALLOW_ALL=1)：所有危险工具将自动执行、不再确认。",
+    );
   }
 
   console.log(

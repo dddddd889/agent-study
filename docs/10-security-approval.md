@@ -49,6 +49,20 @@ const ask = (q) => new Promise((resolve) => {
 
 因为我们用 Node 的 **`readline`**(零依赖、行式)。**Claude Code 的那种单键/方向键模态**是用 **Ink(React for CLIs)+ raw 模式逐键监听**实现的,不是 readline。要那种体验得引入 Ink/blessed,会破坏"零依赖" → 单键模态留 TODO。
 
+## 放行模式(AGENT_ALLOW_ALL)
+
+无人值守等场景不想逐个确认,可用环境变量一键放行:
+
+```bash
+AGENT_ALLOW_ALL=1 bun run start
+```
+
+- 开启后,CLI 把 `onApprove` 接成恒返回 `"always"` → **所有危险工具自动执行、不再弹问**;
+- 启动时打一条**醒目警告**(`⚠ 放行模式…`),避免"忘了开着它"导致 agent 无人值守时乱删/外发;
+- 只认 `"1"`;**默认(不设)仍逐个人工确认** —— 符合"默认关闭、放行需显式 opt-in"。
+
+> ⚠️ 放行模式等于关掉了这道安全闸,`shell` 会裸跑任意命令。仅在你完全清楚后果时用(对标 Claude Code 的 `--dangerously-skip-permissions`)。
+
 ## 测试(`bun test`)
 
 [tests/agent.test.ts](../tests/agent.test.ts) 用标了 `dangerous` 的假工具 + FakeLLM:
