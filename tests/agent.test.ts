@@ -328,6 +328,134 @@ describe("Agent 工具调用循环", () => {
     expect(added).toHaveLength(1);
   });
 
+  // 一个危险工具（每个用例自带 run 以便断言是否执行）。
+  function dangerTool(run: () => string): Tool {
+    return {
+      name: "danger",
+      description: "危险操作",
+      dangerous: true,
+      inputSchema: { type: "object", properties: {} },
+      run,
+    };
+  }
+  // 让 FakeLLM 第一轮要 danger，第二轮 end_turn。
+  function dangerThenDone() {
+    let n = 0;
+    return new FakeLLM(() => {
+      n++;
+      if (n === 1) {
+        return {
+          stopReason: "tool_use",
+          content: [{ type: "tool_use", id: "d", name: "danger", input: {} }],
+        };
+      }
+      return { stopReason: "end_turn", content: [{ type: "text", text: "好的" }] };
+    });
+  }
+
+  test("危险工具：onApprove 返回 once → 执行", async () => {
+    let approvals = 0;
+    const agent = new Agent(dangerThenDone(), {
+      tools: [dangerTool(() => "done")],
+      onApprove: async () => {
+        approvals++;
+        return "once";
+      },
+    });
+    await agent.send("做危险操作");
+    expect(approvals).toBe(1);
+    // tool 被执行：历史里 tool_result 不是 is_error
+    const result = agent.getHistory()[2]!.content as Array<{ is_error?: boolean }>;
+    expect(result[0]!.is_error).toBe(false);
+  });
+
+  test("危险工具：deny → 不执行，喂回 is_error，对话继续", async () => {
+    const ran: string[] = [];
+    const reply = await new Agent(dangerThenDone(), {
+      tools: [dangerTool(() => (ran.push("x"), "done"))],
+      onApprove: async () => "deny",
+    }).send("做危险操作");
+
+    expect(ran).toHaveLength(0); // 没执行
+    expect(reply).toBe("好的"); // 对话继续到 end_turn
+  });
+
+  test("危险工具：always → 后续同名工具不再弹问", async () => {
+    const tool: Tool = {
+      name: "danger",
+      description: "危险",
+      dangerous: true,
+      inputSchema: { type: "object", properties: {} },
+      run: () => "ok",
+    };
+    // 连续两轮都要 danger，再 end_turn
+    let n = 0;
+    const llm = new FakeLLM(() => {
+      n++;
+      if (n <= 2)
+        return {
+          stopReason: "tool_use",
+          content: [{ type: "tool_use", id: `d${n}`, name: "danger", input: {} }],
+        };
+      return { stopReason: "end_turn", content: [{ type: "text", text: "完成" }] };
+    });
+    let approvals = 0;
+    const agent = new Agent(llm, {
+      tools: [tool],
+      onApprove: async () => {
+        approvals++;
+        return "always";
+      },
+    });
+    await agent.send("连做两次危险操作");
+    expect(approvals).toBe(1); // 只在第一次弹问
+  });
+
+  test("没配 onApprove：危险工具默认拒绝（fail closed）", async () => {
+    const tool: Tool = {
+      name: "danger",
+      description: "危险",
+      dangerous: true,
+      inputSchema: { type: "object", properties: {} },
+      run: () => "ok",
+    };
+    const ran: string[] = [];
+    tool.run = () => {
+      ran.push("x");
+      return "ok";
+    };
+    await new Agent(dangerThenDone(), { tools: [tool] }).send("做危险操作");
+    expect(ran).toHaveLength(0); // 默认拒绝，没执行
+  });
+
+  test("安全工具（无 dangerous）不触发 onApprove", async () => {
+    const tool: Tool = {
+      name: "safe",
+      description: "安全",
+      inputSchema: { type: "object", properties: {} },
+      run: () => "ok",
+    };
+    let n = 0;
+    const llm = new FakeLLM(() => {
+      n++;
+      if (n === 1)
+        return {
+          stopReason: "tool_use",
+          content: [{ type: "tool_use", id: "s", name: "safe", input: {} }],
+        };
+      return { stopReason: "end_turn", content: [{ type: "text", text: "ok" }] };
+    });
+    let approvals = 0;
+    await new Agent(llm, {
+      tools: [tool],
+      onApprove: async () => {
+        approvals++;
+        return "once";
+      },
+    }).send("用安全工具");
+    expect(approvals).toBe(0);
+  });
+
   test("onTextDelta 收到模型回复的文本增量", async () => {
     const llm = new FakeLLM(() => "你好世界");
     const chunks: string[] = [];

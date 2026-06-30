@@ -35,6 +35,13 @@ export interface AgentOptions {
   // 一轮的消息「提交到历史」时触发（正常结束 + 中断封口都算），
   // 带本轮新增的消息，供上层持久化（追加落盘）。
   onTurnComplete?: (added: Message[]) => void;
+  // 危险工具（tool.dangerous）执行前的人工确认。返回：
+  //   "once" 允许这一次 / "always" 本会话内总是允许该工具 / "deny" 拒绝。
+  // 不提供则危险工具一律默认拒绝（fail closed）。
+  onApprove?: (call: {
+    name: string;
+    input: Record<string, unknown>;
+  }) => Promise<"once" | "always" | "deny">;
 }
 
 // 带工具调用循环的 Agent。
@@ -53,6 +60,9 @@ export class Agent {
   private onToolResult?: AgentOptions["onToolResult"];
   private onTruncate?: AgentOptions["onTruncate"];
   private onTurnComplete?: AgentOptions["onTurnComplete"];
+  private onApprove?: AgentOptions["onApprove"];
+  // 本会话内「总是允许」的危险工具名（选了 always 的）。
+  private alwaysAllowed = new Set<string>();
   private history: Message[] = [];
 
   constructor(llm: LLM, opts: AgentOptions = {}) {
@@ -66,6 +76,7 @@ export class Agent {
     this.onToolResult = opts.onToolResult;
     this.onTruncate = opts.onTruncate;
     this.onTurnComplete = opts.onTurnComplete;
+    this.onApprove = opts.onApprove;
   }
 
   // 续聊：把磁盘读回来的历史灌进内存（覆盖当前历史）。
@@ -153,6 +164,20 @@ export class Agent {
         for (const call of toolUses) {
           signal?.throwIfAborted();
           this.onToolCall?.({ name: call.name, input: call.input });
+
+          // 安全闸：危险工具执行前要人工确认（除非本会话已选 always）。
+          const denial = await this.checkPermission(call);
+          if (denial) {
+            this.onToolResult?.({ name: call.name, content: denial, isError: true });
+            pendingResults.push({
+              type: "tool_result",
+              tool_use_id: call.id,
+              content: denial,
+              is_error: true,
+            });
+            continue; // 拒绝 => 不执行，把拒绝结果喂回模型，继续下一个
+          }
+
           const { content, isError } = await this.runTool(call, signal);
           this.onToolResult?.({ name: call.name, content, isError });
           pendingResults.push({
@@ -214,6 +239,25 @@ export class Agent {
       beforeTokens,
       afterTokens: estimateTokens(truncated),
     });
+  }
+
+  // 安全闸：判断一个工具调用是否被放行。
+  // 返回 null = 放行；返回字符串 = 拒绝（该字符串作为 is_error 结果喂回模型）。
+  private async checkPermission(call: ToolUseBlock): Promise<string | null> {
+    const tool = this.tools.find((t) => t.name === call.name);
+    // 非危险工具、或本会话已选「总是允许」=> 直接放行。
+    if (!tool?.dangerous || this.alwaysAllowed.has(call.name)) return null;
+    // 危险工具但没配审批回调 => 默认拒绝（fail closed）。
+    if (!this.onApprove) {
+      return `[已拒绝：${call.name} 是危险工具，但未配置人工确认]`;
+    }
+    const decision = await this.onApprove({ name: call.name, input: call.input });
+    if (decision === "always") {
+      this.alwaysAllowed.add(call.name);
+      return null;
+    }
+    if (decision === "once") return null;
+    return `[用户拒绝执行 ${call.name}]`;
   }
 
   // 执行单个工具调用。出错转成 is_error 结果块让模型纠正；

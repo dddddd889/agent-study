@@ -27,27 +27,73 @@ async function main() {
   // onTurnComplete 闭包读取的是 sessionId 这个 let 变量的“当前值”，所以 /new 后能切到新文件。
   let sessionId = process.argv[2] ?? newSessionId();
 
+  const rl = readline.createInterface({
+    input: process.stdin,
+    output: process.stdout,
+  });
+
+  // 当前回合的中断控制器；非 null 表示「正在回复中」。
+  let currentAbort: AbortController | null = null;
+
+  // 读一行：rl 关闭时 resolve null（用于空闲 Ctrl+C 退出）。
+  // 用显式 ask() 而非 `for await (const line of rl)`，这样审批弹问可以在回合中途
+  // 嵌套调用 rl.question 而不和主循环抢输入（同一时刻只有一个问题在等）。
+  // 读一行；rl 关闭或 signal abort 时 resolve null。
+  // 统一结算 settle：幂等(只生效一次) + 集中清理监听，避免重复 resolve / 泄漏。
+  const ask = (q: string, signal?: AbortSignal): Promise<string | null> =>
+    new Promise((resolve) => {
+      if (signal?.aborted) return resolve(null);
+      let settled = false;
+      const settle = (v: string | null) => {
+        if (settled) return;
+        settled = true;
+        rl.off("close", onClose);
+        signal?.removeEventListener("abort", onAbort);
+        resolve(v);
+      };
+      const onClose = () => settle(null);
+      const onAbort = () => settle(null);
+      rl.once("close", onClose);
+      signal?.addEventListener("abort", onAbort, { once: true });
+      // 把 signal 传给 readline：abort 时它会取消这个 question，
+      // 不再吃掉用户随后输入的行。
+      rl.question(q, { signal }, (answer) => settle(answer));
+    });
+
+  // Ctrl+C：回合中 => 中断本轮；空闲 => 关闭 rl（ask 返回 null → 退出）。
+  // 不能在回合期间 rl.pause()，否则 readline 读不到 Ctrl+C 按键。
+  rl.on("SIGINT", () => {
+    if (currentAbort) currentAbort.abort();
+    else rl.close();
+  });
+
   const agent = new Agent(llm, {
     system:
       "你是一个简洁、友好的中文助手。可以使用工具来获取实时信息、读写文件、发起 HTTP 请求或执行 shell 命令。",
     // 每轮的消息提交到历史时追加落盘（append-only）。
     onTurnComplete: (added) => appendMessages(sessionId, added),
-    // defaultTools 含 shell，模型可自动执行任意命令。若有顾虑，可改成
-    // tools: defaultTools.filter((t) => t.name !== "shell") 把 shell 摘掉。
+    // defaultTools 含 shell 等危险工具；执行前会走 onApprove 人工确认。
     tools: defaultTools,
     // 模型回复的文本增量，边生成边裸写到终端（不加换行）。
     onTextDelta: (text) => process.stdout.write(text),
     // 把工具调用过程打印出来，方便观察 agent 循环里发生了什么。
-    // 前导 \n：和正在流式输出的文本分行。
     onToolCall: ({ name, input }) =>
       console.log(`\n  · 调用工具 ${name}(${JSON.stringify(input)})`),
     onToolResult: ({ name, content, isError }) =>
       console.log(`  · ${name} ${isError ? "出错" : "结果"}：${content}`),
-    // 上下文超限时打印一行，让“agent 遗忘了旧对话”这件事可见。
     onTruncate: ({ droppedTurns, beforeTokens, afterTokens }) =>
       console.log(
         `\n  · 上下文超限，已遗忘 ${droppedTurns} 轮旧对话（~${beforeTokens} → ~${afterTokens} token）`,
       ),
+    // 危险工具执行前弹问；复用 ask()，回合中按 Ctrl+C(abort) → ans 为 null → 当作拒绝。
+    onApprove: async ({ name, input }) => {
+      const ans = await ask(
+        `\n  ⚠ 允许执行 ${name}(${JSON.stringify(input)})? [y]一次 /[a]总是 /[n]拒绝 `,
+        currentAbort?.signal,
+      );
+      const c = (ans ?? "").trim().toLowerCase()[0];
+      return c === "y" ? "once" : c === "a" ? "always" : "deny";
+    },
   });
 
   // 续聊：启动带了 sessionId 且磁盘有记录 → 灌进内存接着聊。
@@ -67,31 +113,15 @@ async function main() {
     "命令：/exit 退出 · /reset 清空当前对话 · /sessions 列出会话 · /new 开新会话\n",
   );
 
-  const rl = readline.createInterface({
-    input: process.stdin,
-    output: process.stdout,
-    prompt: "你 > ",
-  });
-
-  // 当前回合的中断控制器；非 null 表示「正在回复中」。
-  let currentAbort: AbortController | null = null;
-  // Ctrl+C：回合中 => 中断本轮；空闲 => 退出。
-  // 注意：这里不能在回合期间 rl.pause()，否则 readline 读不到 Ctrl+C 按键。
-  rl.on("SIGINT", () => {
-    if (currentAbort) currentAbort.abort();
-    else rl.close();
-  });
-
-  rl.prompt();
-
-  for await (const line of rl) {
+  while (true) {
+    const line = await ask("你 > ");
+    if (line === null) break; // rl 已关闭（空闲时 Ctrl+C）
     const text = line.trim();
 
     if (text === "/exit") break;
     if (text === "/reset") {
       agent.reset();
       console.log("（已清空对话历史）\n");
-      rl.prompt();
       continue;
     }
     if (text === "/sessions") {
@@ -106,30 +136,21 @@ async function main() {
         }
         console.log(`\n（续聊某会话：重启时 bun run src/cli.ts <id>）\n`);
       }
-      rl.prompt();
       continue;
     }
     if (text === "/new") {
       sessionId = newSessionId();
       agent.reset();
       console.log(`已开新会话 ${sessionId}\n`);
-      rl.prompt();
       continue;
     }
-    if (text === "") {
-      rl.prompt();
-      continue;
-    }
+    if (text === "") continue;
 
     currentAbort = new AbortController();
     try {
-      // 流式：先打印前缀，回复内容由 onTextDelta 边到边写出，结束后补换行。
-      // 不再打印 send() 的返回值（否则会和流式内容重复）。
       process.stdout.write("\nAI > ");
       const reply = await agent.send(text, { signal: currentAbort.signal });
       process.stdout.write("\n");
-      // 模型以 end_turn 收场却没产出任何文本（常见于工具失败后直接放弃），
-      // 补一句说明，免得“静默结束”看起来像卡住 / 答案被截断。
       if (reply.trim() === "") {
         console.log("(本轮无文本输出，可能是工具失败后模型未给结论)");
       }
@@ -143,8 +164,6 @@ async function main() {
     } finally {
       currentAbort = null;
     }
-
-    rl.prompt();
   }
 
   rl.close();

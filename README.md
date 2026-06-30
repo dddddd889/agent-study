@@ -1,6 +1,6 @@
 # agent-study · 第 1 步：最简对话循环
 
-> 📈 **本仓库按步骤演进。** 当前代码已实现到 **第 9 步：持久化(存盘 + 跨进程续聊)**。步骤文档：
+> 📈 **本仓库按步骤演进。** 当前代码已实现到 **第 10 步：安全控制(危险工具人工确认)**。步骤文档：
 >
 > - 第 2 步 · 工具调用循环 → [docs/02-tool-calling-loop.md](docs/02-tool-calling-loop.md)
 > - 第 3 步 · 常用内置工具（文件 / HTTP / Shell）→ [docs/03-builtin-tools.md](docs/03-builtin-tools.md)
@@ -10,6 +10,7 @@
 > - 第 7 步 · 中断回复（Ctrl+C 打断本轮，含工具内部）→ [docs/07-interrupt.md](docs/07-interrupt.md)
 > - 第 8 步 · http_request 把 HTML 转成 Markdown → [docs/08-http-html-to-markdown.md](docs/08-http-html-to-markdown.md)
 > - 第 9 步 · 持久化（JSONL 存盘 + 跨进程续聊）→ [docs/09-persistence.md](docs/09-persistence.md)
+> - 第 10 步 · 安全控制（危险工具执行前人工确认）→ [docs/10-security-approval.md](docs/10-security-approval.md)
 >
 > 本文件介绍的是**第 1 步内核**（最简对话循环）——它仍是理解后续步骤的基础。
 

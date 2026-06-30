@@ -130,6 +130,7 @@ export const calculator: Tool = {
 export const readFileTool: Tool = {
   name: "read_file",
   description: "读取一个文本文件的内容并返回（UTF-8）。",
+  dangerous: true, // 能读到密钥/隐私文件，且可能被外发 → 需确认
   inputSchema: {
     type: "object",
     properties: {
@@ -148,6 +149,7 @@ export const readFileTool: Tool = {
 export const writeFileTool: Tool = {
   name: "write_file",
   description: "把文本写入文件（覆盖已有内容，自动创建缺失的父目录）。",
+  dangerous: true, // 改文件系统 → 需确认
   inputSchema: {
     type: "object",
     properties: {
@@ -171,6 +173,7 @@ export const httpRequestTool: Tool = {
   name: "http_request",
   description:
     "发起一个 HTTP(S) 请求，返回状态码和响应体。需要获取网络数据 / 调接口时使用。",
+  dangerous: true, // 有网络副作用（外发数据 / 打内网）→ 需确认
   inputSchema: {
     type: "object",
     properties: {
@@ -212,6 +215,7 @@ export const httpRequestTool: Tool = {
 export const shellTool: Tool = {
   name: "shell",
   description: "执行一条 shell 命令，返回 stdout 和 stderr。",
+  dangerous: true, // 能执行任意命令，最危险 → 需确认
   inputSchema: {
     type: "object",
     properties: {

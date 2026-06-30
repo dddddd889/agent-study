@@ -49,6 +49,8 @@ export interface ToolContext {
 export interface Tool {
   name: string;
   description: string; // 写清楚“什么时候用它”，模型据此决定是否调用
+  // 危险工具（碰文件系统 / 网络 / 进程）执行前需人工确认；纯计算工具为 false/省略。
+  dangerous?: boolean;
   // JSON Schema，描述参数结构，模型据此生成 input。
   inputSchema: Record<string, unknown>;
   // 实际执行：拿到模型给的参数（和可选上下文），返回文本结果（可异步）。
