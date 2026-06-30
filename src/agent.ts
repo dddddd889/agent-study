@@ -1,4 +1,9 @@
-import { countTurns, estimateTokens, truncateHistory } from "./context";
+import {
+  countTurns,
+  estimateTokens,
+  splitForCompaction,
+  truncateHistory,
+} from "./context";
 import type {
   ContentBlock,
   LLM,
@@ -9,14 +14,21 @@ import type {
   ToolUseBlock,
 } from "./types";
 
+// 摘要消息的标记前缀(置顶 user 消息),也用于 contextStats 判断「是否含摘要」。
+export const SUMMARY_PREFIX = "[对话摘要]";
+// 摘要那次 LLM 调用的 system 提示(测试也据 "摘要" 关键字识别这次调用)。
+const SUMMARY_SYSTEM = "你是对话摘要器，只输出摘要正文，不要寒暄或任何前后缀。";
+
 export interface AgentOptions {
   system?: string;
   tools?: Tool[];
   // 工具循环的最大步数，防止模型反复要工具陷入死循环。默认 10。
   maxSteps?: number;
-  // 上下文管理：历史估算 token 超过此值时，按整轮截断最旧的对话。默认 100000。
-  // 想观察截断效果，把它调小（如 500）即可。
+  // 上下文管理：历史估算 token 超过此「软目标」时压缩。默认 100000。
+  // 想观察压缩效果，把它调小（如 500）即可。注意是软目标 —— 压不到也只尽力而为。
   maxContextTokens?: number;
+  // 压缩时保留最近几轮逐字（更早的轮摘要掉）。默认 2。
+  keepRecentTurns?: number;
   // 模型回复的文本增量回调，便于 CLI 边生成边显示（流式）。
   onTextDelta?: (text: string) => void;
   // 可选事件回调，便于 CLI 展示「正在调用工具 / 工具结果」等过程。
@@ -26,8 +38,10 @@ export interface AgentOptions {
     content: string;
     isError: boolean;
   }) => void;
-  // 上下文被截断时触发，便于 CLI 显示「agent 遗忘了旧对话」。
-  onTruncate?: (info: {
+  // 上下文被压缩时触发，便于 CLI 显示「已摘要/截断旧对话」。
+  // strategy: "summarize" 摘要 / "truncate" 摘要失败的回退截断。
+  onCompact?: (info: {
+    strategy: "summarize" | "truncate";
     droppedTurns: number;
     beforeTokens: number;
     afterTokens: number;
@@ -55,10 +69,11 @@ export class Agent {
   private tools: Tool[];
   private maxSteps: number;
   private maxContextTokens: number;
+  private keepRecentTurns: number;
   private onTextDelta?: AgentOptions["onTextDelta"];
   private onToolCall?: AgentOptions["onToolCall"];
   private onToolResult?: AgentOptions["onToolResult"];
-  private onTruncate?: AgentOptions["onTruncate"];
+  private onCompact?: AgentOptions["onCompact"];
   private onTurnComplete?: AgentOptions["onTurnComplete"];
   private onApprove?: AgentOptions["onApprove"];
   // 本会话内「总是允许」的危险工具名（选了 always 的）。
@@ -71,10 +86,11 @@ export class Agent {
     this.tools = opts.tools ?? [];
     this.maxSteps = opts.maxSteps ?? 10;
     this.maxContextTokens = opts.maxContextTokens ?? 100000;
+    this.keepRecentTurns = opts.keepRecentTurns ?? 2;
     this.onTextDelta = opts.onTextDelta;
     this.onToolCall = opts.onToolCall;
     this.onToolResult = opts.onToolResult;
-    this.onTruncate = opts.onTruncate;
+    this.onCompact = opts.onCompact;
     this.onTurnComplete = opts.onTurnComplete;
     this.onApprove = opts.onApprove;
   }
@@ -115,8 +131,8 @@ export class Agent {
         pendingToolUses = null;
         pendingResults = [];
 
-        // 调模型前先做上下文管理：历史过长就按整轮截断最旧的对话。
-        this.compactHistory();
+        // 调模型前先做上下文管理：历史过长就摘要压缩最旧的对话。
+        await this.compactHistory(signal);
         signal?.throwIfAborted();
 
         // 消费流式生成器：yield 是文本增量(实时显示 + 累积供封口)，
@@ -221,24 +237,96 @@ export class Agent {
     }
   }
 
-  // 上下文管理：历史估算 token 超过 maxContextTokens 时，按整轮截断最旧的对话。
-  // TODO: 目前是「就地遗忘」—— this.history 被真删。如需保留完整历史，可改为
-  //       保留完整历史、仅在发送时用截断副本，或把丢弃的旧轮归档到别处。
-  // TODO: 截断之外还可做「摘要压缩」—— 把旧轮再调一次 LLM 浓缩成一段摘要塞回。
-  private compactHistory(): void {
+  // 当前上下文构成，供 /context 等观测用。
+  contextStats(): {
+    tokens: number;
+    messages: number;
+    turns: number;
+    hasSummary: boolean;
+    maxContextTokens: number;
+  } {
+    return {
+      tokens: estimateTokens(this.history),
+      messages: this.history.length,
+      turns: countTurns(this.history),
+      hasSummary: this.history.some(
+        (m) =>
+          m.role === "user" &&
+          typeof m.content === "string" &&
+          m.content.startsWith(SUMMARY_PREFIX),
+      ),
+      maxContextTokens: this.maxContextTokens,
+    };
+  }
+
+  // 上下文管理：历史估算 token 超过软目标 maxContextTokens 时，
+  // 把「旧轮」摘要成一段、保留最近 keepRecentTurns 轮逐字;摘要失败回退到整轮截断。
+  // 是一次性、尽力而为:压不到软目标(如最近几轮本身就大)也不反复摘、不报错,按现状继续。
+  // 注意:摘要只活在内存(磁盘留完整流水,见 docs/09)。
+  // TODO: 单条消息过大(超大工具结果/粘贴)轮级摘要缩不动 —— 需消息级压缩
+  //       (diff 编辑 / context editing / 读取分页),见 docs/11。
+  private async compactHistory(signal?: AbortSignal): Promise<void> {
     const beforeTokens = estimateTokens(this.history);
     if (beforeTokens <= this.maxContextTokens) return;
 
-    const truncated = truncateHistory(this.history, this.maxContextTokens);
-    if (truncated.length === this.history.length) return; // 已是最近 1 轮，砍不动了
+    const { old, recent } = splitForCompaction(this.history, this.keepRecentTurns);
+    if (old.length === 0) return; // 没有可摘要的旧轮(轮数 ≤ K),尽力而为,按现状继续
 
-    const droppedTurns = countTurns(this.history) - countTurns(truncated);
-    this.history = truncated;
-    this.onTruncate?.({
+    let next: Message[];
+    let strategy: "summarize" | "truncate";
+    let droppedTurns: number;
+    try {
+      const summary = await this.summarize(old, signal);
+      next = [{ role: "user", content: `${SUMMARY_PREFIX}\n${summary}` }, ...recent];
+      strategy = "summarize";
+      droppedTurns = countTurns(old); // 被折叠进摘要的旧轮数
+    } catch (err) {
+      if (signal?.aborted) throw err; // 用户中断 => 交给 send 封口，不当作摘要失败
+      // 摘要失败(网络等)=> 回退整轮截断,保证 agent 不因摘要挂掉
+      next = truncateHistory(this.history, this.maxContextTokens);
+      strategy = "truncate";
+      droppedTurns = countTurns(this.history) - countTurns(next);
+    }
+
+    this.history = next;
+    this.onCompact?.({
+      strategy,
       droppedTurns,
       beforeTokens,
-      afterTokens: estimateTokens(truncated),
+      afterTokens: estimateTokens(next),
     });
+  }
+
+  // 把一段旧消息调一次 LLM 浓缩成摘要文本(无工具、聚焦提示、drain 取文本)。
+  private async summarize(
+    messages: Message[],
+    signal?: AbortSignal,
+  ): Promise<string> {
+    const transcript = messages
+      .map((m) => {
+        const text =
+          typeof m.content === "string" ? m.content : JSON.stringify(m.content);
+        return `${m.role}: ${text}`;
+      })
+      .join("\n");
+    const it = this.llm.stream(
+      [
+        {
+          role: "user",
+          content:
+            "请把下面这段对话浓缩成简洁摘要，保留关键事实、用户偏好、已做的决定和未完成事项，省略寒暄。只输出摘要正文：\n\n" +
+            transcript,
+        },
+      ],
+      { system: SUMMARY_SYSTEM, signal },
+    );
+    let text = "";
+    let step = await it.next();
+    while (!step.done) {
+      text += step.value;
+      step = await it.next();
+    }
+    return text || this.extractText(step.value.content);
   }
 
   // 安全闸：判断一个工具调用是否被放行。

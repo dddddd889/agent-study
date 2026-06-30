@@ -76,6 +76,8 @@ async function main() {
       "你是一个简洁、友好的中文助手。可以使用工具来获取实时信息、读写文件、发起 HTTP 请求或执行 shell 命令。",
     // 每轮的消息提交到历史时追加落盘（append-only）。
     onTurnComplete: (added) => appendMessages(sessionId, added),
+    // 上下文软上限：默认 100000；设 AGENT_MAX_CONTEXT_TOKENS 调小可观察压缩(摘要)。
+    maxContextTokens: Number(process.env.AGENT_MAX_CONTEXT_TOKENS) || undefined,
     // defaultTools 含 shell 等危险工具；执行前会走 onApprove 人工确认。
     tools: defaultTools,
     // 模型回复的文本增量，边生成边裸写到终端（不加换行）。
@@ -85,9 +87,9 @@ async function main() {
       console.log(`\n  · 调用工具 ${name}(${JSON.stringify(input)})`),
     onToolResult: ({ name, content, isError }) =>
       console.log(`  · ${name} ${isError ? "出错" : "结果"}：${content}`),
-    onTruncate: ({ droppedTurns, beforeTokens, afterTokens }) =>
+    onCompact: ({ strategy, droppedTurns, beforeTokens, afterTokens }) =>
       console.log(
-        `\n  · 上下文超限，已遗忘 ${droppedTurns} 轮旧对话（~${beforeTokens} → ~${afterTokens} token）`,
+        `\n  · 上下文压缩(${strategy === "summarize" ? "摘要" : "截断"})：${droppedTurns} 轮旧对话（~${beforeTokens} → ~${afterTokens} token）`,
       ),
     // 危险工具执行前弹问；复用 ask()，回合中按 Ctrl+C(abort) → ans 为 null → 当作拒绝。
     // 放行模式下直接全部允许，不弹问。
@@ -123,7 +125,7 @@ async function main() {
   }
 
   console.log(
-    "命令：/exit 退出 · /reset 清空当前对话 · /sessions 列出会话 · /new 开新会话\n",
+    "命令：/exit 退出 · /reset 清空 · /sessions 列出会话 · /new 开新会话 · /context 看上下文\n",
   );
 
   while (true) {
@@ -155,6 +157,13 @@ async function main() {
       sessionId = newSessionId();
       agent.reset();
       console.log(`已开新会话 ${sessionId}\n`);
+      continue;
+    }
+    if (text === "/context") {
+      const s = agent.contextStats();
+      console.log(
+        `上下文：~${s.tokens} token · ${s.messages} 条消息 · ${s.turns} 轮 · 含摘要 ${s.hasSummary ? "✓" : "✗"} · 软上限 ${s.maxContextTokens}\n`,
+      );
       continue;
     }
     if (text === "") continue;

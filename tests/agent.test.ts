@@ -467,27 +467,64 @@ describe("Agent 工具调用循环", () => {
     expect(chunks.join("")).toBe("你好世界"); // 增量拼起来 = 最终回复
   });
 
-  test("历史超过 maxContextTokens 时按轮截断，并触发 onTruncate", async () => {
-    const llm = new FakeLLM();
-    const events: Array<{ droppedTurns: number }> = [];
-    const agent = new Agent(llm, {
-      maxContextTokens: 30, // 很小，强制截断
-      onTruncate: (info) => events.push(info),
+  // FakeLLM：对「摘要请求」(system 含 "摘要") 返回固定摘要，正常对话返回固定答复。
+  function summarizerLLM() {
+    return new FakeLLM((_messages, opts) => {
+      if (opts.system?.includes("摘要")) return "这是旧对话的摘要";
+      return { stopReason: "end_turn", content: [{ type: "text", text: "好的" }] };
+    });
+  }
+
+  test("超过 maxContextTokens：摘要旧轮、保留最近轮、触发 onCompact(summarize)", async () => {
+    const events: Array<{ strategy: string }> = [];
+    const agent = new Agent(summarizerLLM(), {
+      maxContextTokens: 30, // 很小，强制压缩
+      keepRecentTurns: 1,
+      onCompact: (info) => events.push(info),
     });
 
-    for (let i = 1; i <= 6; i++) {
+    for (let i = 1; i <= 5; i++) {
       await agent.send(`这是第${i}句话，用来把上下文撑长一点`);
     }
 
+    expect(events.some((e) => e.strategy === "summarize")).toBe(true);
+    // 压缩后历史以「摘要」消息开头
     const h = agent.getHistory();
-    expect(h.length).toBeLessThan(12); // 没有无限增长
-    expect(h[0]!.role).toBe("user");
-    expect(typeof h[0]!.content).toBe("string"); // 首条是真实用户输入
-    expect(events.length).toBeGreaterThan(0); // 至少截断过一次
+    expect(typeof h[0]!.content).toBe("string");
+    expect(h[0]!.content as string).toContain("[对话摘要]");
+    expect(h[0]!.content as string).toContain("这是旧对话的摘要");
+    expect(agent.contextStats().hasSummary).toBe(true);
+  });
 
-    // 最近一次调用 LLM 时，收到的就是截断后的短历史。
-    const lastCall = llm.calls[llm.calls.length - 1]!;
-    expect(lastCall.messages.length).toBeLessThan(12);
+  test("摘要调用失败 → 回退整轮截断，触发 onCompact(truncate)", async () => {
+    const llm = new FakeLLM((_messages, opts) => {
+      if (opts.system?.includes("摘要")) throw new Error("summarize failed");
+      return { stopReason: "end_turn", content: [{ type: "text", text: "好的" }] };
+    });
+    const events: Array<{ strategy: string }> = [];
+    const agent = new Agent(llm, {
+      maxContextTokens: 30,
+      keepRecentTurns: 1,
+      onCompact: (info) => events.push(info),
+    });
+
+    for (let i = 1; i <= 5; i++) {
+      await agent.send(`这是第${i}句话，用来把上下文撑长一点`);
+    }
+
+    expect(events.some((e) => e.strategy === "truncate")).toBe(true);
+    // 回退截断：历史不含摘要标记
+    expect(agent.contextStats().hasSummary).toBe(false);
+  });
+
+  test("contextStats 返回当前上下文构成", async () => {
+    const agent = new Agent(summarizerLLM());
+    await agent.send("你好");
+    const s = agent.contextStats();
+    expect(s.messages).toBe(2);
+    expect(s.turns).toBe(1);
+    expect(s.hasSummary).toBe(false);
+    expect(s.tokens).toBeGreaterThan(0);
   });
 
   test("onToolCall / onToolResult 回调会被触发", async () => {

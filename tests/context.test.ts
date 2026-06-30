@@ -1,5 +1,10 @@
 import { describe, expect, test } from "bun:test";
-import { countTurns, estimateTokens, truncateHistory } from "../src/context";
+import {
+  countTurns,
+  estimateTokens,
+  splitForCompaction,
+  truncateHistory,
+} from "../src/context";
 import type { Message } from "../src/types";
 
 describe("estimateTokens", () => {
@@ -86,5 +91,37 @@ describe("truncateHistory", () => {
     const out = truncateHistory(h, 1);
     expect(countTurns(out)).toBeGreaterThanOrEqual(1);
     expect(out[0]!.content).toBe("第三句"); // 只剩最近一轮
+  });
+});
+
+describe("splitForCompaction", () => {
+  const h: Message[] = [
+    { role: "user", content: "Q1" },
+    { role: "assistant", content: "A1" },
+    { role: "user", content: "Q2" },
+    { role: "assistant", content: "A2" },
+    { role: "user", content: "Q3" },
+    { role: "assistant", content: "A3" },
+  ];
+
+  test("保留最近 K 轮逐字，其余作为旧轮", () => {
+    const { old, recent } = splitForCompaction(h, 1);
+    expect(recent).toEqual([
+      { role: "user", content: "Q3" },
+      { role: "assistant", content: "A3" },
+    ]);
+    expect(old).toEqual(h.slice(0, 4)); // 轮1、轮2
+  });
+
+  test("轮数 ≤ K 时没有可摘要的旧轮(old 为空)", () => {
+    const { old, recent } = splitForCompaction(h, 5);
+    expect(old).toEqual([]);
+    expect(recent).toBe(h);
+  });
+
+  test("切分点对齐真实用户输入：recent 以 user 字符串开头", () => {
+    const { recent } = splitForCompaction(h, 2);
+    expect(recent[0]!.role).toBe("user");
+    expect(typeof recent[0]!.content).toBe("string");
   });
 });

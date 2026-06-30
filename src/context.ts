@@ -46,6 +46,22 @@ function messageText(m: Message): string {
     .join("");
 }
 
+// 为「摘要压缩」切分历史：保留最近 keepTurns 轮逐字，其余作为「旧轮」待摘要。
+// 在「真实用户输入」处对齐切分，保证 old 是整轮、recent 以真实 user 输入开头(都合法)。
+// 轮数 ≤ keepTurns 时 old 为空(没有可摘要的旧轮)。
+export function splitForCompaction(
+  messages: Message[],
+  keepTurns: number,
+): { old: Message[]; recent: Message[] } {
+  const starts: number[] = [];
+  messages.forEach((m, i) => {
+    if (isUserInput(m)) starts.push(i);
+  });
+  if (starts.length <= keepTurns) return { old: [], recent: messages };
+  const cut = starts[starts.length - keepTurns]!;
+  return { old: messages.slice(0, cut), recent: messages.slice(cut) };
+}
+
 // 按「整轮」截断历史，使估算 token ≤ maxTokens。
 // 安全约束（见 docs/04）：
 //   1. 只在「真实用户输入」处对齐，结果第一条一定是真实用户输入，

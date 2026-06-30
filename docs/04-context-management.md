@@ -1,5 +1,7 @@
 # 第 4 步：上下文管理（token 估算 + 整轮截断）
 
+📌 **后续改动**:本步的"整轮**截断丢弃**"在第 11 步升级为"**摘要压缩**"(旧轮先调 LLM 摘要再丢,信息不全丢);回调 `onTruncate` 也改名 `onCompact`(带 strategy)。本文保留初始设计,升级见 [docs/11](11-summarization-compaction.md)。`truncateHistory` 仍保留为摘要失败时的回退。
+
 > 前面几步里,`Agent` 每轮都把**完整 history** 发给模型。对话越长,发的 token 越多 —— 越慢、越贵,最终会撞上模型的上下文窗口。
 > 这一步给 agent 装上**上下文管理**:估算历史 token,过长时按「整轮」丢弃最旧的对话。
 
