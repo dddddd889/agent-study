@@ -7,11 +7,14 @@ import { loadMcpTools, type McpServerInfo } from "./mcp";
 import {
   appendMessages,
   listSessions,
+  listSubagents,
   loadSession,
   newSessionId,
 } from "./session";
+import { createDispatchAgentTool } from "./subagent";
 import { latestTodos, renderTodos } from "./todo";
 import { defaultTools } from "./tools";
+import type { Tool } from "./types";
 
 // 命令行入口：把 agent 循环包进一个 REPL。
 // 输入 /exit 退出，/reset 清空对话历史。
@@ -41,7 +44,10 @@ async function main() {
     "你是一个简洁、友好的中文助手。可以使用工具来获取实时信息、读写文件、发起 HTTP 请求或执行 shell 命令。\n\n" +
     "处理需要多步骤的任务时,先用 todo_write 把目标拆成清单再动手;" +
     "每开始一项就把它标为 in_progress、做完立刻标 completed,同一时刻最多一项 in_progress;" +
-    "计划有变就重发完整清单。简单的一两步任务不必用。";
+    "计划有变就重发完整清单。简单的一两步任务不必用。\n\n" +
+    "遇到【独立、边界清晰】的子任务(尤其会产生大量中间过程的,如「读若干文件并总结」" +
+    "「调研某库用法」),可用 dispatch_agent 交给子 agent 隔离执行、只收回结论,避免这些过程占满你的上下文。" +
+    "务必把子任务所需的【完整背景】写进 prompt —— 子 agent 看不到当前对话。";
   const memory = readMemory();
   const system = memory ? `${baseSystem}\n\n[长期记忆]\n${memory}` : baseSystem;
 
@@ -118,6 +124,43 @@ async function main() {
     }
   };
 
+  // 危险工具审批(第10步):主 agent 与子 agent【共享】同一回调 + 同一「本会话总是允许」集合。
+  // 这样在主 agent 里对某工具选过 [a]总是,子 agent 再用它就不重复弹问(见 docs/15 · Q7)。
+  // 复用 ask()，回合中按 Ctrl+C(abort) → ans 为 null → 当作拒绝。放行模式下全部允许、不弹问。
+  const sessionAllowed = new Set<string>();
+  const onApprove = allowAll
+    ? async () => "always" as const
+    : async ({ name, input }: { name: string; input: Record<string, unknown> }) => {
+        if (sessionAllowed.has(name)) return "always" as const; // 已总是允许,不再打断
+        const ans = await ask(
+          `\n  ⚠ 允许执行 ${name}(${JSON.stringify(input)})? [y]一次 /[a]总是 /[n]拒绝 `,
+          currentAbort?.signal,
+        );
+        const c = (ans ?? "").trim().toLowerCase()[0];
+        if (c === "a") {
+          sessionAllowed.add(name);
+          return "always" as const;
+        }
+        return c === "y" ? ("once" as const) : ("deny" as const);
+      };
+
+  // 子 agent(第15步):dispatch_agent 就是又一个普通工具。getSessionId 闭包读当前 sessionId
+  // (/new 后自动切目录);currentTools 返回当前全集(含 MCP 热重载),子 agent 在此基础上剔除
+  // dispatch_agent 自己(禁递归)。子 agent 的过程带 ⤷ 缩进打印,与主 agent 的输出层级分明。
+  const getSessionId = () => sessionId;
+  let dispatchTool: Tool;
+  const currentTools = (): Tool[] => [...defaultTools, dispatchTool, ...mcp.tools];
+  dispatchTool = createDispatchAgentTool({
+    llm,
+    getTools: currentTools,
+    getSessionId,
+    onApprove,
+    onToolCall: ({ name, input }) =>
+      console.log(`\n    ⤷ 子 agent 调用 ${name}(${JSON.stringify(input)})`),
+    onToolResult: ({ name, content, isError }) =>
+      console.log(`    ⤷ ${name} ${isError ? "出错" : "结果"}：${content}`),
+  });
+
   const agent = new Agent(llm, {
     system,
     // 每轮的消息提交到历史时追加落盘（append-only）。
@@ -126,8 +169,8 @@ async function main() {
     maxContextTokens: Number(process.env.AGENT_MAX_CONTEXT_TOKENS) || undefined,
     // 干活步数上限：默认 10(辅助工具如 todo 不计入)；大任务用 AGENT_MAX_STEPS 调大。
     maxSteps: Number(process.env.AGENT_MAX_STEPS) || undefined,
-    // 本地工具 + MCP 外部工具(都含危险工具；执行前走 onApprove 人工确认)。
-    tools: [...defaultTools, ...mcp.tools],
+    // 本地工具 + dispatch_agent(子 agent)+ MCP 外部工具(危险工具执行前走 onApprove 确认)。
+    tools: currentTools(),
     // 模型回复的文本增量，边生成边裸写到终端（不加换行）。
     onTextDelta: (text) => process.stdout.write(text),
     // 把工具调用过程打印出来，方便观察 agent 循环里发生了什么。
@@ -139,18 +182,7 @@ async function main() {
       console.log(
         `\n  · 上下文压缩(${strategy === "summarize" ? "摘要" : "截断"})：${droppedTurns} 轮旧对话（~${beforeTokens} → ~${afterTokens} token）`,
       ),
-    // 危险工具执行前弹问；复用 ask()，回合中按 Ctrl+C(abort) → ans 为 null → 当作拒绝。
-    // 放行模式下直接全部允许，不弹问。
-    onApprove: allowAll
-      ? async () => "always"
-      : async ({ name, input }) => {
-          const ans = await ask(
-            `\n  ⚠ 允许执行 ${name}(${JSON.stringify(input)})? [y]一次 /[a]总是 /[n]拒绝 `,
-            currentAbort?.signal,
-          );
-          const c = (ans ?? "").trim().toLowerCase()[0];
-          return c === "y" ? "once" : c === "a" ? "always" : "deny";
-        },
+    onApprove,
   });
 
   // MCP 后台加载:不阻塞 REPL。连好后替换句柄 + setTools + 打印就绪概况。
@@ -163,7 +195,7 @@ async function main() {
       .then((h) => {
         mcp = h;
         mcpLoaded = true;
-        agent.setTools([...defaultTools, ...mcp.tools]);
+        agent.setTools(currentTools());
         if (h.servers.length) {
           process.stdout.write("\n  · MCP 已就绪：\n");
           printMcp(h.servers);
@@ -214,7 +246,7 @@ async function main() {
   }
 
   console.log(
-    "命令：/exit · /reset · /sessions · /new · /context · /memory · /todo · /mcp [reload]",
+    "命令：/exit · /reset · /sessions · /new · /context · /memory · /todo · /agents · /mcp [reload]",
   );
 
   // 提示符已可立即出现;MCP 在后台连(连好再打印就绪概况、再可用)。
@@ -271,6 +303,18 @@ async function main() {
       console.log(todos.length ? `[当前任务]\n${renderTodos(todos)}\n` : "(暂无任务清单)\n");
       continue;
     }
+    if (text === "/agents") {
+      // 列出本会话派出过的子 agent(从 .sessions/<主id>/agents/ 存档解析)。
+      const list = listSubagents(sessionId);
+      if (!list.length) console.log("(本会话暂无子 agent 记录)\n");
+      else {
+        for (const a of list) {
+          console.log(`  #${a.index}  ${a.messages} 条消息  ${a.preview.slice(0, 30)}`);
+        }
+        console.log(`\n（完整存档：.sessions/${sessionId}/agents/agent-N.jsonl）\n`);
+      }
+      continue;
+    }
     if (text === "/mcp") {
       if (!mcpLoaded) console.log("MCP 连接中…(后台,稍候)"); // 还没连好
       else printMcp(mcp.servers);
@@ -281,7 +325,7 @@ async function main() {
       await mcpReady; // 等后台首连结束,避免和 reload 抢句柄
       await mcp.close(); // 关旧连接(kill 子进程 / 关会话)
       mcp = await loadMcpTools(); // 重读 .mcp.json、重连
-      agent.setTools([...defaultTools, ...mcp.tools]); // 运行时换工具集
+      agent.setTools(currentTools()); // 运行时换工具集(dispatch_agent + 新 MCP)
       console.log("已重载 MCP：");
       printMcp(mcp.servers);
       console.log("");
