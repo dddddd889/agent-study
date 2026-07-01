@@ -11,7 +11,11 @@ import {
   loadSession,
   newSessionId,
 } from "./session";
-import { createDispatchAgentTool, DISPATCH_TOOL_NAME } from "./subagent";
+import {
+  createCriticTool,
+  createDispatchAgentTool,
+  DISPATCH_TOOL_NAME,
+} from "./subagent";
 import { latestTodos, renderTodos } from "./todo";
 import { defaultTools } from "./tools";
 import type { Tool } from "./types";
@@ -65,7 +69,11 @@ async function main() {
     "计划有变就重发完整清单。简单的一两步任务不必用。\n\n" +
     "遇到【独立、边界清晰】的子任务(尤其会产生大量中间过程的,如「读若干文件并总结」" +
     "「调研某库用法」),可用 dispatch_agent 交给子 agent 隔离执行、只收回结论,避免这些过程占满你的上下文。" +
-    "务必把子任务所需的【完整背景】写进 prompt —— 子 agent 看不到当前对话。";
+    "务必把子任务所需的【完整背景】写进 prompt —— 子 agent 看不到当前对话。\n\n" +
+    "重要 / 易错 / 有可验证产物的产出,完成后可用 critic 请一个隔离审查者自查:" +
+    "【同时】给它 task(原始任务)和 output(产出),有代码/文件就在 artifacts 里给路径。" +
+    "拿到裁定后,【只为 `[严重]` 问题返工】、修完再复审,最多约两轮;`[次要]` 可带注记直接交付,别死磕。" +
+    "平凡确定的操作(ls、看时间、单次读取)不必审查 —— 审查有成本,别滥用。";
   const memory = readMemory();
   const system = memory ? `${baseSystem}\n\n[长期记忆]\n${memory}` : baseSystem;
 
@@ -200,22 +208,33 @@ async function main() {
   // dispatch_agent 自己(禁递归)。子 agent 的过程带 └ 缩进打印,与主 agent 的输出层级分明。
   const getSessionId = () => sessionId;
   let dispatchTool: Tool;
-  const currentTools = (): Tool[] => [...defaultTools, dispatchTool, ...mcp.tools];
-  dispatchTool = createDispatchAgentTool({
+  let criticTool: Tool;
+  const currentTools = (): Tool[] => [
+    ...defaultTools,
+    dispatchTool,
+    criticTool,
+    ...mcp.tools,
+  ];
+  // dispatch_agent 与 critic 共享同一套依赖(取工具集 / 会话 id / 审批 / 显示回调)。
+  const subDeps = {
     llm,
     getTools: currentTools,
     getSessionId,
     onApprove,
-    // 子 agent 启动:主层(█)打一条「派出子 agent ▓<id>」,把父→子对应挑明(prompt 取摘要)。
-    onSubStart: (id, prompt) =>
-      emit(`\n█ 派出子 agent ${paintSub(id, `▓${id}`)}：${prompt.replace(/\s+/g, " ")}`),
+    // 子 agent 启动:主层(█)打一条,按类型区分「派出子 agent」/「请 critic 审查」。
+    onSubStart: (id: string, prompt: string, kind: "dispatch" | "critic") =>
+      emit(
+        `\n█ ${kind === "critic" ? "请 critic 审查" : "派出子 agent"} ${paintSub(id, `▓${id}`)}：${prompt.replace(/\s+/g, " ")}`,
+      ),
     // 子 agent 过程:缩进(深度1)+ 灰度块 ▓ + 短 id;【只给 ▓<id> 标记上色】,正文默认色。
     // 并行交织时,靠这个彩色标记一眼分清是哪个子 agent(docs/16)。经 emit:审批期间先缓冲。
-    onSubToolCall: (id, { name, input }) =>
+    onSubToolCall: (id: string, { name, input }: { name: string; input: Record<string, unknown> }) =>
       emit(`\n  ${paintSub(id, `▓${id}`)} 调用 ${name}(${JSON.stringify(input)})`),
-    onSubToolResult: (id, { name, content, isError }) =>
+    onSubToolResult: (id: string, { name, content, isError }: { name: string; content: string; isError: boolean }) =>
       emit(`  ${paintSub(id, `▓${id}`)} ${name} ${isError ? "出错" : "结果"}：${content}`),
-  });
+  };
+  dispatchTool = createDispatchAgentTool(subDeps);
+  criticTool = createCriticTool(subDeps);
 
   const agent = new Agent(llm, {
     system,
