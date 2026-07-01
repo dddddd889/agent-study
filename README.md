@@ -205,8 +205,23 @@ console.log("RESPONSE", data);
 
 **下一步（规划中）**：
 
-- 🚧 **用户自定义角色**：从 `.claude/agents/*.md` 之类项目配置加载角色（对标 Claude Code），不改代码就能加。
+_更贴近 Codex CLI / Claude Code CLI —— 编码 agent 的手脚 + 安全模型 + 项目集成：_
+
+- 🚧 **代码补丁 + 分页 read**：`apply_patch`（diff，对标 Codex）/ `Edit`（精确字符串替换 + 唯一性校验，对标 Claude Code），`read_file` 带行号 + offset/limit。从「整文件覆盖」→「精确改代码」，编码 agent 的分水岭。
+- 🚧 **结构化检索**：`grep`（ripgrep）/ `glob` 专用工具，结构化输出，替代裸 `shell` grep。
+- 🚧 **路径沙箱**：`read`/`write`/`patch` 限制在工作目录内，堵路径穿越（`../../etc/passwd`）。
+- 🚧 **权限模式 / 执行沙箱**：会话级模式（如「自动批准编辑、shell 仍问」，对标 Codex sandbox 模式 / CC permission modes）+ 可选命令执行沙箱。路径沙箱是其一部分。
+- 🚧 **指令注入**：启动读 `AGENTS.md`（Codex）/ `CLAUDE.md`（Claude Code）注入 system —— 已有 `.memory.md`，几乎白送。
+- 🚧 **自定义 slash 命令**：`.claude/commands/*.md`（对标 CC）/ prompts（对标 Codex），放个 md 就多一个命令。
+- 🚧 **plan mode**：只读探路 → 出计划 → 批准后再动手（对标 CC）。已有 todo + explore 角色，差一个「只读闸门 + 批准解锁写」。
+
+_多 agent 深化：_
+
+- 🚧 **用户自定义角色**：从 `.claude/agents/*.md` 加载角色（对标 CC），不改代码就能加。
 - 🚧 **agent 间通信**：子 agent 之间传消息 / 共享黑板。
-- 也可补基建：多行输入、消息级压缩、工具护栏（路径沙箱/SSRF）、prompt caching。
+
+_基建打磨：_
+
+- 🚧 多行输入（grill 到一半）、消息级压缩、prompt caching、成本/token 实时显示。
 
 每一步都建议先补测试，再写实现——`FakeLLM` 的模式可以一直复用。
