@@ -1,5 +1,6 @@
+import { randomBytes } from "node:crypto";
 import { Agent, type AgentOptions } from "./agent";
-import { appendSubagentMessages, nextSubagentIndex } from "./session";
+import { appendSubagentMessages } from "./session";
 import type { LLM, Message, Tool } from "./types";
 
 // 第 15 步:子 agent —— 把一个【独立子任务】甩给一个【上下文隔离】的子 agent 去跑,只收回结论。
@@ -64,12 +65,26 @@ export interface DispatchDeps {
   getSessionId: () => string;
   // 危险工具审批:透传主 agent 的同一个回调(主/子共享,见 docs/15)。
   onApprove?: AgentOptions["onApprove"];
-  // 子 agent 过程回调(CLI 注入,带 ⤷ 缩进打印);测试可不传。
-  onTextDelta?: AgentOptions["onTextDelta"];
-  onToolCall?: AgentOptions["onToolCall"];
-  onToolResult?: AgentOptions["onToolResult"];
+  // 子 agent 启动时触发(带短 id + 任务 prompt):供 CLI 在【主层】打一条「派出子 agent <id>」,
+  // 把父→子对应关系挑明。并行时多个子 agent 同时启动也各有 id,不会误读成嵌套(docs/16)。
+  onSubStart?: (id: string, prompt: string) => void;
+  // 子 agent 过程回调,【带上短 id】供 CLI 按 id 上色 + 打灰度块前缀;并行时据此分辨来源(docs/16)。
+  onSubToolCall?: (
+    id: string,
+    call: { name: string; input: Record<string, unknown> },
+  ) => void;
+  onSubToolResult?: (
+    id: string,
+    result: { name: string; content: string; isError: boolean },
+  ) => void;
   // 覆盖子 agent 步数上限(测试用);默认 SUBAGENT_MAX_STEPS。
   maxSteps?: number;
+}
+
+// 子 agent 的随机短 id(6 位十六进制,如 a2f9c1):天然唯一、并发分配也不撞,
+// 无需计数器/播种。用作存档名 agent-<id>.jsonl、显示前缀、以及按出现顺序给它分配颜色(见 docs/16)。
+function allocSubagentId(): string {
+  return randomBytes(3).toString("hex");
 }
 
 // 统计子 agent 的「干活步数」:发起过【非辅助】tool_use 的 assistant 轮数(口径同主 agent)。
@@ -99,6 +114,7 @@ export function createDispatchAgentTool(deps: DispatchDeps): Tool {
       "⚠️ 关键:子 agent【看不到】当前对话,你必须把它完成任务所需的【全部背景】写进 prompt" +
       "(不能说「像刚才那样」「用上面提到的文件」——它读不到)。子 agent 无法再派子 agent。",
     dangerous: false, // 自身不碰副作用;真正的副作用在子 agent 内部的具体工具上,那里会走审批
+    concurrent: true, // 可并行:一轮派多个子 agent 时并发执行(见 docs/16)
     inputSchema: {
       type: "object",
       properties: {
@@ -115,7 +131,8 @@ export function createDispatchAgentTool(deps: DispatchDeps): Tool {
       if (!prompt) throw new Error("dispatch_agent 需要非空的 prompt");
 
       const mainId = getSessionId();
-      const index = nextSubagentIndex(mainId);
+      const id = allocSubagentId(); // 随机短 id,并发也不撞
+      deps.onSubStart?.(id, prompt); // 主层打「派出子 agent <id>」,挑明父→子对应
       // 禁递归:子 agent 拿「全套 − dispatch_agent 自己」;getTools 返回当前全集,自带 MCP。
       const tools = getTools().filter((t) => t.name !== DISPATCH_TOOL_NAME);
       const usedTools = new Set<string>();
@@ -127,14 +144,13 @@ export function createDispatchAgentTool(deps: DispatchDeps): Tool {
         maxSteps: deps.maxSteps ?? SUBAGENT_MAX_STEPS,
         // 审批透传:主/子共享同一回调与「总是允许」集合。
         onApprove,
-        // 存档:子 agent 一整轮(含被中断时的封口)落到 agents/agent-N.jsonl。
-        onTurnComplete: (added) => appendSubagentMessages(mainId, index, added),
-        onTextDelta: deps.onTextDelta,
+        // 存档:子 agent 一整轮(含被中断时的封口)落到 agents/agent-<id>.jsonl。
+        onTurnComplete: (added) => appendSubagentMessages(mainId, id, added),
         onToolCall: (c) => {
           usedTools.add(c.name);
-          deps.onToolCall?.(c);
+          deps.onSubToolCall?.(id, c); // 带短 id → CLI 上色 + 打灰度块前缀
         },
-        onToolResult: deps.onToolResult,
+        onToolResult: (r) => deps.onSubToolResult?.(id, r),
       });
 
       // signal 透传:一次 Ctrl+C 同时中断子 agent。abort 时 sub.send 会先封口(补取消结果 +
@@ -152,7 +168,7 @@ export function createDispatchAgentTool(deps: DispatchDeps): Tool {
           await finalizeOnBudget(llm, sub.getHistory(), ctx?.signal)
         ).trim();
         // 撞满步数这条路径没走 onTurnComplete(send 抛了),手动把完整过程 + 收尾结论落档。
-        appendSubagentMessages(mainId, index, [
+        appendSubagentMessages(mainId, id, [
           ...sub.getHistory(),
           { role: "assistant", content: conclusion },
         ]);
@@ -161,7 +177,7 @@ export function createDispatchAgentTool(deps: DispatchDeps): Tool {
       // 连收尾都没产出文本(工具连续失败等)→ 抛错 = is_error,让主 agent 知道子任务失败。
       if (!conclusion) {
         throw new Error(
-          `子 agent#${index} 未产出结论(工具连续失败或收尾为空)`,
+          `子 agent ${id} 未产出结论(工具连续失败或收尾为空)`,
         );
       }
 
@@ -169,7 +185,7 @@ export function createDispatchAgentTool(deps: DispatchDeps): Tool {
       const steps = countWorkSteps(sub.getHistory(), tools);
       const used = [...usedTools].join("、") || "无";
       const note = truncated ? "｜⚠️达步数上限,以下为阶段性结论" : "";
-      return `${conclusion}\n\n（子 agent#${index}｜${steps} 步${note}｜用过工具: ${used}）`;
+      return `${conclusion}\n\n（子 agent ${id}｜${steps} 步${note}｜用过工具: ${used}）`;
     },
   };
 }

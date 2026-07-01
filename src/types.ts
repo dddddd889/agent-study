@@ -54,6 +54,10 @@ export interface Tool {
   // 辅助工具（如 todo 记账）：本身不推进任务,调用它【不计入 maxSteps 步数预算】。
   // 否则「每步都更新 todo」会蚕食步数,让真正干活 + 收尾挤不进上限。见 docs/14。
   auxiliary?: boolean;
+  // 可并发工具（如 dispatch_agent 派子 agent）：无副作用竞态、可安全并行。
+  // 仅当【某一轮的工具调用全是 concurrent】时,Agent 才并发执行它们;只要混进任何
+  // 非 concurrent 工具(write_file/shell 等讲顺序/有副作用的),整轮退回串行。见 docs/16。
+  concurrent?: boolean;
   // JSON Schema，描述参数结构，模型据此生成 input。
   inputSchema: Record<string, unknown>;
   // 实际执行：拿到模型给的参数（和可选上下文），返回文本结果（可异步）。

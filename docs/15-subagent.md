@@ -41,11 +41,13 @@
 .sessions/
   <主id>.jsonl              ← 主会话流水(只含 dispatch_agent 的调用 + 结论)
   <主id>/agents/
-    agent-1.jsonl           ← 子 agent #1 的完整过程
-    agent-2.jsonl           ← 子 agent #2 …
+    agent-a2f9c1.jsonl      ← 某个子 agent 的完整过程(名字用它的随机短 id)
+    agent-7b3e04.jsonl      ← 另一个子 agent …
 ```
 
-- 序号 = 派活时数一下目录里已有几个 +1（[src/session.ts](../src/session.ts) `nextSubagentIndex`）。续聊后子 agent 不重跑（结论已在主流水里），序号天然接着涨、不撞号。
+> 注：第 15 步最初用顺序号 `agent-N.jsonl`,并行(第 16 步)后改成**随机短 id**,并发派活也不撞、还便于配色区分。见 [docs/16](16-parallel-subagents.md)。
+
+- 档名用子 agent 的**随机短 id**（`agent-<id>.jsonl`，见 [src/subagent.ts](../src/subagent.ts) `allocSubagentId`）。并发派活天然不撞（第 16 步从顺序号改来，原因见 [docs/16](16-parallel-subagents.md)）。
 - 落盘走子 agent 自己的 `onTurnComplete`——所以**被 Ctrl+C 中断时，封口后的部分档案也保存得下来**。
 - `listSessions` 只认 `*.jsonl` 文件，`<主id>/` 目录被自动忽略，不污染会话列表。
 
@@ -68,13 +70,15 @@
 只有**结论**——子 agent 的最终文本，外加一小段过程元信息：
 
 ```
-去做子任务,背景齐全
-  ⤷ 子 agent 调用 echo({"text":"hi"})
-  ⤷ echo 结果：echo:hi
-  · dispatch_agent 结果：子任务完成:结论 X
+█ 派出子 agent ▓a2f9c1：去做子任务,背景齐全…
+  ▓a2f9c1 调用 echo({"text":"hi"})
+  ▓a2f9c1 echo 结果：echo:hi
+█ dispatch_agent 结果：子任务完成:结论 X
 
-（子 agent#1｜1 步｜用过工具: echo）
+（子 agent a2f9c1｜1 步｜用过工具: echo）
 ```
+
+> 前缀说明(第 16 步)：`█` 主 agent、`▓<id>` 子 agent(短 id),子 agent 行还会**按 id 上色**;缩进/灰度块表层级。详见 [docs/16](16-parallel-subagents.md)。
 
 子 agent 跑完**没有任何文本输出**（比如撞满步数）时，`run()` 抛错 → 主 agent 收到 `is_error` 的结果，知道子任务失败、可以改法重试，而不是静默拿到空结论。
 
@@ -87,8 +91,8 @@
 
 ## 可观测
 
-- **实时**：子 agent 的每步工具调用/结果带 `  ⤷ ` 缩进打到终端，和主 agent 的输出层级分明——你能亲眼看着一个独立的子循环在跑。
-- **事后**：`/agents` 命令列出本会话派出过的子 agent（序号、消息数、prompt 摘要）；完整过程翻 `.sessions/<主id>/agents/agent-N.jsonl`。
+- **实时**：子 agent 的每步工具调用/结果带 `  ▓<id> ` 前缀（灰度块表层级、短 id + 颜色表身份）打到终端，和主 agent（`█`）的输出层级分明——你能亲眼看着一个独立的子循环在跑。
+- **事后**：`/agents` 命令列出本会话派出过的子 agent（短 id、消息数、prompt 摘要）；完整过程翻 `.sessions/<主id>/agents/agent-<id>.jsonl`。
 
 ## 测试（`bun test`，全程 `FakeLLM` 离线）
 
@@ -102,6 +106,6 @@
 
 ## 下一步
 
-- **并行子 agent**：让主 agent 一轮派多个、`Promise.all` 并发跑。要同时解决输出交织（改行缓冲带标签）与审批竞争（串行化队列）。
+- **并行子 agent**（已实现，见 [docs/16](16-parallel-subagents.md)）：主 agent 一轮派多个、并发跑，配套输出 `▓<id>` 灰度块 + 短 id + 配色，与审批互斥锁。
 - **子 agent 类型/角色**：注册表 `{ [type]: { system, tools } }`，input 加 `agent_type`——像 Claude Code 的 Explore / Plan。
 - **之后**才谈 agent 间的双向通信。

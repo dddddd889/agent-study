@@ -11,10 +11,28 @@ import {
   loadSession,
   newSessionId,
 } from "./session";
-import { createDispatchAgentTool } from "./subagent";
+import { createDispatchAgentTool, DISPATCH_TOOL_NAME } from "./subagent";
 import { latestTodos, renderTodos } from "./todo";
 import { defaultTools } from "./tools";
 import type { Tool } from "./types";
+
+// 子 agent 显示配色(第16步):每个【新出现】的子 agent 按顺序分到下一个调色板颜色,
+// 保证同时出现的多个子 agent 颜色互不相同(超过调色板数量才回卷);同一 id 本会话内恒定同色。
+// 10 色全避开报错用的红。仅在真终端(TTY)上色;被重定向/管道时输出纯文本,不污染日志。
+const SUB_COLORS = [36, 32, 33, 35, 34, 96, 92, 93, 95, 94];
+const subColorOf = new Map<string, number>();
+let subColorNext = 0;
+const colorForId = (id: string): number => {
+  let c = subColorOf.get(id);
+  if (c === undefined) {
+    c = SUB_COLORS[subColorNext++ % SUB_COLORS.length]!;
+    subColorOf.set(id, c);
+  }
+  return c;
+};
+// 只给传入的片段上色(就是 ▓<id> 这个身份标记),正文保持默认色。
+const paintSub = (id: string, s: string): string =>
+  process.stdout.isTTY ? `\x1b[${colorForId(id)}m${s}\x1b[0m` : s;
 
 // 命令行入口：把 agent 循环包进一个 REPL。
 // 输入 /exit 退出，/reset 清空对话历史。
@@ -124,29 +142,62 @@ async function main() {
     }
   };
 
+  // 审批期间「定住」输出(第16步):并行下,当一个子 agent 正弹审批、等你回答时,其它并行
+  // 子 agent 仍在跑、仍会打日志,会把审批提示行冲掉。于是审批一旦挂起(approvalPending),
+  // 其它工具/子 agent 的日志先【缓冲】进 held,等审批结束再一次性放出来,保证提示行不被覆盖。
+  let approvalPending = false;
+  const held: string[] = [];
+  const emit = (line: string): void => {
+    if (approvalPending) held.push(line);
+    else console.log(line);
+  };
+  const flushHeld = (): void => {
+    for (const l of held) console.log(l);
+    held.length = 0;
+  };
+
   // 危险工具审批(第10步):主 agent 与子 agent【共享】同一回调 + 同一「本会话总是允许」集合。
   // 这样在主 agent 里对某工具选过 [a]总是,子 agent 再用它就不重复弹问(见 docs/15 · Q7)。
   // 复用 ask()，回合中按 Ctrl+C(abort) → ans 为 null → 当作拒绝。放行模式下全部允许、不弹问。
   const sessionAllowed = new Set<string>();
+  // 审批串行化(第16步):并行子 agent 可能同时请求审批,用一把异步锁保证【一次只弹一个】
+  // 问题、不抢同一个 readline stdin;顺带消除 sessionAllowed 的「查-问-加」竞态(见 docs/16)。
+  // 链式实现:每个请求排在前一个之后,前者无论成败都放行下一个。
+  let approveChain: Promise<unknown> = Promise.resolve();
+  const withApprovalLock = <T>(fn: () => Promise<T>): Promise<T> => {
+    const run = approveChain.then(fn, fn);
+    approveChain = run.then(
+      () => {},
+      () => {},
+    );
+    return run;
+  };
   const onApprove = allowAll
     ? async () => "always" as const
-    : async ({ name, input }: { name: string; input: Record<string, unknown> }) => {
-        if (sessionAllowed.has(name)) return "always" as const; // 已总是允许,不再打断
-        const ans = await ask(
-          `\n  ⚠ 允许执行 ${name}(${JSON.stringify(input)})? [y]一次 /[a]总是 /[n]拒绝 `,
-          currentAbort?.signal,
-        );
-        const c = (ans ?? "").trim().toLowerCase()[0];
-        if (c === "a") {
-          sessionAllowed.add(name);
-          return "always" as const;
-        }
-        return c === "y" ? ("once" as const) : ("deny" as const);
-      };
+    : ({ name, input }: { name: string; input: Record<string, unknown> }) =>
+        withApprovalLock(async () => {
+          if (sessionAllowed.has(name)) return "always" as const; // 已总是允许,不再打断
+          approvalPending = true; // 定住其它并行子 agent 的日志,别冲掉下面的提示行
+          try {
+            const ans = await ask(
+              `\n  ⚠ 允许执行 ${name}(${JSON.stringify(input)})? [y]一次 /[a]总是 /[n]拒绝 `,
+              currentAbort?.signal,
+            );
+            const c = (ans ?? "").trim().toLowerCase()[0];
+            if (c === "a") {
+              sessionAllowed.add(name);
+              return "always" as const;
+            }
+            return c === "y" ? ("once" as const) : ("deny" as const);
+          } finally {
+            approvalPending = false;
+            flushHeld(); // 审批结束,把期间缓冲的日志按序放出来
+          }
+        });
 
   // 子 agent(第15步):dispatch_agent 就是又一个普通工具。getSessionId 闭包读当前 sessionId
   // (/new 后自动切目录);currentTools 返回当前全集(含 MCP 热重载),子 agent 在此基础上剔除
-  // dispatch_agent 自己(禁递归)。子 agent 的过程带 ⤷ 缩进打印,与主 agent 的输出层级分明。
+  // dispatch_agent 自己(禁递归)。子 agent 的过程带 └ 缩进打印,与主 agent 的输出层级分明。
   const getSessionId = () => sessionId;
   let dispatchTool: Tool;
   const currentTools = (): Tool[] => [...defaultTools, dispatchTool, ...mcp.tools];
@@ -155,10 +206,15 @@ async function main() {
     getTools: currentTools,
     getSessionId,
     onApprove,
-    onToolCall: ({ name, input }) =>
-      console.log(`\n    ⤷ 子 agent 调用 ${name}(${JSON.stringify(input)})`),
-    onToolResult: ({ name, content, isError }) =>
-      console.log(`    ⤷ ${name} ${isError ? "出错" : "结果"}：${content}`),
+    // 子 agent 启动:主层(█)打一条「派出子 agent ▓<id>」,把父→子对应挑明(prompt 取摘要)。
+    onSubStart: (id, prompt) =>
+      emit(`\n█ 派出子 agent ${paintSub(id, `▓${id}`)}：${prompt.replace(/\s+/g, " ")}`),
+    // 子 agent 过程:缩进(深度1)+ 灰度块 ▓ + 短 id;【只给 ▓<id> 标记上色】,正文默认色。
+    // 并行交织时,靠这个彩色标记一眼分清是哪个子 agent(docs/16)。经 emit:审批期间先缓冲。
+    onSubToolCall: (id, { name, input }) =>
+      emit(`\n  ${paintSub(id, `▓${id}`)} 调用 ${name}(${JSON.stringify(input)})`),
+    onSubToolResult: (id, { name, content, isError }) =>
+      emit(`  ${paintSub(id, `▓${id}`)} ${name} ${isError ? "出错" : "结果"}：${content}`),
   });
 
   const agent = new Agent(llm, {
@@ -174,10 +230,14 @@ async function main() {
     // 模型回复的文本增量，边生成边裸写到终端（不加换行）。
     onTextDelta: (text) => process.stdout.write(text),
     // 把工具调用过程打印出来，方便观察 agent 循环里发生了什么。
-    onToolCall: ({ name, input }) =>
-      console.log(`\n  · 调用工具 ${name}(${JSON.stringify(input)})`),
+    // dispatch_agent 例外：它的启动由 onSubStart 打「派出子 agent ▓<id>」更清晰,这里跳过,
+    // 免得再重复一条冗长(含完整 prompt)的通用行,并行时更是徒增交织噪音。
+    onToolCall: ({ name, input }) => {
+      if (name === DISPATCH_TOOL_NAME) return;
+      emit(`\n█ 调用工具 ${name}(${JSON.stringify(input)})`);
+    },
     onToolResult: ({ name, content, isError }) =>
-      console.log(`  · ${name} ${isError ? "出错" : "结果"}：${content}`),
+      emit(`█ ${name} ${isError ? "出错" : "结果"}：${content}`),
     onCompact: ({ strategy, droppedTurns, beforeTokens, afterTokens }) =>
       console.log(
         `\n  · 上下文压缩(${strategy === "summarize" ? "摘要" : "截断"})：${droppedTurns} 轮旧对话（~${beforeTokens} → ~${afterTokens} token）`,
@@ -309,9 +369,11 @@ async function main() {
       if (!list.length) console.log("(本会话暂无子 agent 记录)\n");
       else {
         for (const a of list) {
-          console.log(`  #${a.index}  ${a.messages} 条消息  ${a.preview.slice(0, 30)}`);
+          console.log(
+            `  ${paintSub(a.id, `▓${a.id}`)}  ${a.messages} 条消息  ${a.preview.slice(0, 30)}`,
+          );
         }
-        console.log(`\n（完整存档：.sessions/${sessionId}/agents/agent-N.jsonl）\n`);
+        console.log(`\n（完整存档：.sessions/${sessionId}/agents/agent-<id>.jsonl）\n`);
       }
       continue;
     }

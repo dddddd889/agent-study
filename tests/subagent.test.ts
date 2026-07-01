@@ -1,5 +1,5 @@
 import { afterAll, describe, expect, test } from "bun:test";
-import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Agent } from "../src/agent";
@@ -15,6 +15,12 @@ import { FakeLLM } from "./fake-llm";
 const TMP = mkdtempSync(join(tmpdir(), "subagent-test-"));
 process.env.AGENT_SESSIONS_DIR = TMP;
 afterAll(() => rmSync(TMP, { recursive: true, force: true }));
+
+// 子档案名现在是随机短 id(agent-<id>.jsonl),测试不再假定具体文件名,改为列目录。
+const agentFiles = (sid: string): string[] => {
+  const dir = join(TMP, sid, "agents");
+  return existsSync(dir) ? readdirSync(dir).filter((f) => /^agent-.+\.jsonl$/.test(f)) : [];
+};
 
 // 一个最小的「干活」子工具,供子 agent 调用(非辅助,会计入步数)。
 const echoTool: Tool = {
@@ -88,7 +94,7 @@ describe("dispatch_agent:上下文隔离 + 只收回结论", () => {
       .filter((b) => b.type === "tool_result");
     const dispatchResult = results.find((b) => b.tool_use_id === "m1")!;
     expect(dispatchResult.content).toContain("结论 X");
-    expect(dispatchResult.content).toContain("子 agent#1");
+    expect(dispatchResult.content).toContain("子 agent "); // 结论元信息带子 agent 短 id
     expect(dispatchResult.content).toContain("echo"); // 元信息里报告用过 echo
     // 主历史里不该出现子 agent 的 echo 的 tool_use。
     const mainHasEcho = agent
@@ -147,7 +153,7 @@ describe("dispatch_agent:上下文隔离 + 只收回结论", () => {
 });
 
 describe("dispatch_agent:存档与失败语义", () => {
-  test("子 agent 完整历史落盘到 .sessions/<主id>/agents/agent-1.jsonl", async () => {
+  test("子 agent 完整历史落盘到 .sessions/<主id>/agents/agent-<id>.jsonl", async () => {
     let mainDispatched = false;
     let subDidTool = false;
     const llm = new FakeLLM((messages, opts): string | LLMResponse => {
@@ -168,9 +174,9 @@ describe("dispatch_agent:存档与失败语义", () => {
     const { agent } = build(llm, { sessionId: "sess-archive" });
     await agent.send("go");
 
-    const file = join(TMP, "sess-archive", "agents", "agent-1.jsonl");
-    expect(existsSync(file)).toBe(true);
-    const dump = readFileSync(file, "utf-8");
+    const files = agentFiles("sess-archive");
+    expect(files).toHaveLength(1); // 派了一个子 agent → 一个档案
+    const dump = readFileSync(join(TMP, "sess-archive", "agents", files[0]!), "utf-8");
     // 子档案里应能看到子 agent 的 prompt、echo 调用与结论 —— 完整过程都在这。
     expect(dump).toContain("写点东西");
     expect(dump).toContain("echo");
@@ -178,7 +184,7 @@ describe("dispatch_agent:存档与失败语义", () => {
     // 而主流水(主上下文)里不含 echo(隔离,前一个 describe 已验证方向)。
   });
 
-  test("子档案序号递增:第二次派活 → agent-2.jsonl", async () => {
+  test("连派两次 → 两个独立子档案(各自唯一 id)", async () => {
     // 主 agent 连派两次子 agent,各自跑完给结论。
     let mainStep = 0;
     const subGiven = new Set<number>();
@@ -195,8 +201,7 @@ describe("dispatch_agent:存档与失败语义", () => {
 
     const { agent } = build(llm, { sessionId: "sess-seq" });
     await agent.send("派两次");
-    expect(existsSync(join(TMP, "sess-seq", "agents", "agent-1.jsonl"))).toBe(true);
-    expect(existsSync(join(TMP, "sess-seq", "agents", "agent-2.jsonl"))).toBe(true);
+    expect(agentFiles("sess-seq")).toHaveLength(2); // 两次派活 → 两个独立档案
   });
 
   test("子 agent 撞满步数 → 收尾给出【阶段性结论】(不硬失败、不丢工作)", async () => {
@@ -229,7 +234,7 @@ describe("dispatch_agent:存档与失败语义", () => {
     expect(content).toContain("阶段性结论:已处理前几项");
     expect(content).toContain("阶段性结论"); // 元信息里的截断提示
     // 收尾路径也把子档案落了盘。
-    expect(existsSync(join(TMP, "sess-finalize", "agents", "agent-1.jsonl"))).toBe(true);
+    expect(agentFiles("sess-finalize")).toHaveLength(1);
   });
 
   test("子 agent 连收尾都无文本 → 仍返回 is_error 给主 agent", async () => {

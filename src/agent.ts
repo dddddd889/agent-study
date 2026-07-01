@@ -25,6 +25,9 @@ export interface AgentOptions {
   // 工具循环里【干活步数】的上限，防止模型反复调工具陷入死循环。默认 10。
   // 注：辅助工具(tool.auxiliary,如 todo 记账)不计入此预算,见 send() 与 docs/14。
   maxSteps?: number;
+  // 并发上限：一轮里若同时执行多个 concurrent 工具(如并行子 agent),最多几个在飞。
+  // 默认 5(或 AGENT_MAX_CONCURRENCY)。防一次派几十个打爆 API / 本机。见 docs/16。
+  maxConcurrency?: number;
   // 上下文管理：历史估算 token 超过此「软目标」时压缩。默认 100000。
   // 想观察压缩效果，把它调小（如 500）即可。注意是软目标 —— 压不到也只尽力而为。
   maxContextTokens?: number;
@@ -59,6 +62,27 @@ export interface AgentOptions {
   }) => Promise<"once" | "always" | "deny">;
 }
 
+// 极简异步信号量:限制同时在飞的任务数(并行子 agent 的并发上限)。
+// run() 里超额就 await 排队,有任务结束就唤醒一个等待者。JS 单线程,计数无需加锁。
+class Semaphore {
+  private active = 0;
+  private waiters: Array<() => void> = [];
+  constructor(private readonly max: number) {}
+
+  async run<T>(fn: () => Promise<T>): Promise<T> {
+    if (this.active >= this.max) {
+      await new Promise<void>((resolve) => this.waiters.push(resolve));
+    }
+    this.active++;
+    try {
+      return await fn();
+    } finally {
+      this.active--;
+      this.waiters.shift()?.(); // 让出一个名额,唤醒下一个排队者
+    }
+  }
+}
+
 // 带工具调用循环的 Agent。
 // 相比最简对话循环，核心变化是：send() 不再「一问一答」，而是一个循环——
 // 调模型 -> 若模型要用工具就执行 -> 把结果喂回历史 -> 再调模型 -> ...
@@ -69,6 +93,7 @@ export class Agent {
   private system?: string;
   private tools: Tool[];
   private maxSteps: number;
+  private maxConcurrency: number;
   private maxContextTokens: number;
   private keepRecentTurns: number;
   private onTextDelta?: AgentOptions["onTextDelta"];
@@ -86,6 +111,8 @@ export class Agent {
     this.system = opts.system;
     this.tools = opts.tools ?? [];
     this.maxSteps = opts.maxSteps ?? 10;
+    this.maxConcurrency =
+      opts.maxConcurrency ?? (Number(process.env.AGENT_MAX_CONCURRENCY) || 5);
     this.maxContextTokens = opts.maxContextTokens ?? 100000;
     this.keepRecentTurns = opts.keepRecentTurns ?? 2;
     this.onTextDelta = opts.onTextDelta;
@@ -186,35 +213,38 @@ export class Agent {
         // 有工具调用 => 完整存下这一步内容块（含 tool_use，结果靠 id 对应）。
         commit({ role: "assistant", content: res.content });
 
-        // 进入工具阶段：逐个执行，结果收集成一条 user 消息（tool_result 数组）。
+        // 进入工具阶段：把结果收集成一条 user 消息（tool_result 数组）。
         pendingToolUses = toolUses;
         pendingResults = [];
-        for (const call of toolUses) {
-          signal?.throwIfAborted();
-          this.onToolCall?.({ name: call.name, input: call.input });
 
-          // 安全闸：危险工具执行前要人工确认（除非本会话已选 always）。
-          const denial = await this.checkPermission(call);
-          if (denial) {
-            this.onToolResult?.({ name: call.name, content: denial, isError: true });
-            pendingResults.push({
-              type: "tool_result",
-              tool_use_id: call.id,
-              content: denial,
-              is_error: true,
-            });
-            continue; // 拒绝 => 不执行，把拒绝结果喂回模型，继续下一个
+        // 并行判定(见 docs/16):本轮 >1 个调用【且全是 concurrent 工具】→ 并发跑;
+        // 只要混进任何非 concurrent 工具(讲顺序/有副作用)→ 整轮退回串行。
+        const allConcurrent =
+          toolUses.length > 1 &&
+          toolUses.every((c) => this.tools.find((t) => t.name === c.name)?.concurrent);
+
+        if (allConcurrent) {
+          // 并发执行,受信号量约束(≤ maxConcurrency 在飞)。allSettled 等所有在飞【落定】
+          // (含中断时各自封口);结果按【原索引】回填,与 tool_use 顺序/ id 对应,不因完成
+          // 先后错位。某个 execOne 因中断抛出 → 该槽留 null,交下方封口补取消结果。
+          const sem = new Semaphore(this.maxConcurrency);
+          const slots: (ToolResultBlock | null)[] = toolUses.map(() => null);
+          await Promise.allSettled(
+            toolUses.map((call, i) =>
+              sem.run(() => this.execOne(call, signal)).then((r) => {
+                slots[i] = r;
+              }),
+            ),
+          );
+          for (const r of slots) if (r) pendingResults.push(r);
+          if (slots.some((r) => r === null)) signal?.throwIfAborted();
+        } else {
+          // 串行(默认):逐个执行,任一中断即抛出交封口。
+          for (const call of toolUses) {
+            pendingResults.push(await this.execOne(call, signal));
           }
-
-          const { content, isError } = await this.runTool(call, signal);
-          this.onToolResult?.({ name: call.name, content, isError });
-          pendingResults.push({
-            type: "tool_result",
-            tool_use_id: call.id,
-            content,
-            is_error: isError,
-          });
         }
+
         commit({ role: "user", content: pendingResults });
         pendingToolUses = null;
 
@@ -386,6 +416,29 @@ export class Agent {
       if (signal?.aborted) throw err; // 用户中断 → 上抛
       return { content: (err as Error).message, isError: true };
     }
+  }
+
+  // 执行单个工具调用的【完整一趟】:回调通知 → 安全闸审批 → 真跑 → 回调结果,
+  // 产出一条 tool_result。串行/并行两条路都复用它,保证语义一致。
+  // 只有「用户中断」会从这里抛出(经 runTool 上抛),交由并发收集 / 封口处理;
+  // 其它错误都被 runTool 转成 is_error 结果,不抛。
+  private async execOne(
+    call: ToolUseBlock,
+    signal?: AbortSignal,
+  ): Promise<ToolResultBlock> {
+    signal?.throwIfAborted();
+    this.onToolCall?.({ name: call.name, input: call.input });
+
+    // 安全闸：危险工具执行前要人工确认（除非本会话已选 always）。
+    const denial = await this.checkPermission(call);
+    if (denial) {
+      this.onToolResult?.({ name: call.name, content: denial, isError: true });
+      return { type: "tool_result", tool_use_id: call.id, content: denial, is_error: true };
+    }
+
+    const { content, isError } = await this.runTool(call, signal);
+    this.onToolResult?.({ name: call.name, content, isError });
+    return { type: "tool_result", tool_use_id: call.id, content, is_error: isError };
   }
 
   // 从内容块里抽取纯文本并拼接，作为最终回复字符串。

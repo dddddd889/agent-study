@@ -74,48 +74,43 @@ export function listSessions(): Array<{
     .sort((a, b) => b.updatedAt.getTime() - a.updatedAt.getTime());
 }
 
-// ===== 子 agent 存档（第 15 步）=====
+// ===== 子 agent 存档（第 15/16 步）=====
 // 子 agent 的完整历史存到主会话目录下的 agents/ 子目录,与主会话流水【分开】:
-//   .sessions/<主id>/agents/agent-N.jsonl
+//   .sessions/<主id>/agents/agent-<id>.jsonl   (<id> = 子 agent 的随机短 id)
 // 主上下文与主会话流水都不含它,只留一条「结论」;这里的存档仅供事后观测(/agents)。
+// 用随机短 id(而非顺序号):并行时天然唯一、不撞,且显示上便于配色/区分(见 docs/16)。
 
 function subagentDir(mainId: string): string {
   return join(sessionsDir(), mainId, "agents");
 }
 
-// 下一个子档案序号 = 目录里已有 agent-*.jsonl 数量 + 1。
-// 串行派活下不会撞号;续聊后子 agent 不重跑(结论已在主流水里),序号天然接着涨。
-export function nextSubagentIndex(mainId: string): number {
-  const dir = subagentDir(mainId);
-  if (!existsSync(dir)) return 1;
-  return readdirSync(dir).filter((f) => /^agent-\d+\.jsonl$/.test(f)).length + 1;
-}
-
 // 追加子 agent 本轮消息(每条一行,append-only),自动建目录。
 export function appendSubagentMessages(
   mainId: string,
-  index: number,
+  id: string,
   messages: Message[],
 ): void {
   if (messages.length === 0) return;
   mkdirSync(subagentDir(mainId), { recursive: true });
-  const path = join(subagentDir(mainId), `agent-${index}.jsonl`);
+  const path = join(subagentDir(mainId), `agent-${id}.jsonl`);
   const lines = messages.map((m) => JSON.stringify(m)).join("\n") + "\n";
   appendFileSync(path, lines, "utf-8");
 }
 
-// 列出某主会话派出过的子 agent(给 /agents 观测):序号、消息数、首条 prompt 摘要。
+// 列出某主会话派出过的子 agent(给 /agents 观测):短 id、消息数、首条 prompt 摘要。
+// 无顺序号了,按文件 mtime(最近在后)排序。
 export function listSubagents(mainId: string): Array<{
-  index: number;
+  id: string;
   messages: number;
   preview: string;
 }> {
   const dir = subagentDir(mainId);
   if (!existsSync(dir)) return [];
   return readdirSync(dir)
-    .filter((f) => /^agent-\d+\.jsonl$/.test(f))
+    .filter((f) => /^agent-.+\.jsonl$/.test(f))
     .map((f) => {
-      const index = Number(f.match(/^agent-(\d+)\.jsonl$/)![1]);
+      const id = f.match(/^agent-(.+)\.jsonl$/)![1]!;
+      const mtime = statSync(join(dir, f)).mtimeMs;
       let msgs: Message[] = [];
       try {
         msgs = readFileSync(join(dir, f), "utf-8")
@@ -123,14 +118,15 @@ export function listSubagents(mainId: string): Array<{
           .filter((line) => line.trim() !== "")
           .map((line) => JSON.parse(line) as Message);
       } catch {
-        // 损坏的档案跳过内容,仍列出序号
+        // 损坏的档案跳过内容,仍列出 id
       }
       const first = msgs.find(
         (m) => m.role === "user" && typeof m.content === "string",
       );
       const preview =
         first && typeof first.content === "string" ? first.content : "";
-      return { index, messages: msgs.length, preview };
+      return { id, messages: msgs.length, preview, mtime };
     })
-    .sort((a, b) => a.index - b.index);
+    .sort((a, b) => a.mtime - b.mtime)
+    .map(({ id, messages, preview }) => ({ id, messages, preview }));
 }

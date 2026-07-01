@@ -1,6 +1,6 @@
 # agent-study · 第 1 步：最简对话循环
 
-> 📈 **本仓库按步骤演进。** 当前代码已实现到 **第 15 步：子 agent（上下文隔离）**。步骤文档：
+> 📈 **本仓库按步骤演进。** 当前代码已实现到 **第 16 步：并行子 agent（并发执行）**。步骤文档：
 >
 > - 第 2 步 · 工具调用循环 → [docs/02-tool-calling-loop.md](docs/02-tool-calling-loop.md)
 > - 第 3 步 · 常用内置工具（文件 / HTTP / Shell）→ [docs/03-builtin-tools.md](docs/03-builtin-tools.md)
@@ -16,6 +16,7 @@
 > - 第 13 步 · 接入 MCP（外部工具 / .mcp.json / /mcp [reload]）→ [docs/13-mcp.md](docs/13-mcp.md)
 > - 第 14 步 · 规划 / 子任务分解（todo 清单 / todo_write / /todo）→ [docs/14-planning-todo.md](docs/14-planning-todo.md)
 > - 第 15 步 · 子 agent（上下文隔离 / dispatch_agent / /agents）→ [docs/15-subagent.md](docs/15-subagent.md)
+> - 第 16 步 · 并行子 agent（concurrent 工具 / 信号量 / 灰度块+短id+配色）→ [docs/16-parallel-subagents.md](docs/16-parallel-subagents.md)
 >
 > 本文件介绍的是**第 1 步内核**（最简对话循环）——它仍是理解后续步骤的基础。
 
@@ -121,7 +122,7 @@ AI > 你好小明！很高兴认识你。
 AI > 你叫小明。      ← 证明它记住了上下文
 ```
 
-命令：`/reset` 清空对话历史，`/exit` 退出，`/sessions` 列出会话，`/new` 开新会话。
+命令：`/exit` 退出 · `/reset` 清空对话历史 · `/sessions` 列出会话 · `/new` 开新会话 · `/context` 看上下文用量 · `/memory` 看长期记忆 · `/todo` 看当前任务清单 · `/agents` 看本会话派出的子 agent · `/mcp [reload]` 看/重载 MCP。
 
 续聊历史会话：`bun run src/cli.ts <sessionId>`（会话存在 `.sessions/`，惰性创建，跑完一轮才出现）。
 
@@ -180,7 +181,7 @@ console.log("RESPONSE", data);
 
 ## 演进进度 & 下一步
 
-从第 1 步内核出发，已经一步步长到了第 15 步。**已完成**（每步一篇 docs，见顶部导航）：
+从第 1 步内核出发，已经一步步长到了第 16 步。**已完成**（每步一篇 docs，见顶部导航）：
 
 - ✅ 第 2 步 · 工具调用循环（从"聊天机器人"变"agent"的关键一步）
 - ✅ 第 3 步 · 内置工具（文件 / HTTP / Shell）
@@ -196,11 +197,12 @@ console.log("RESPONSE", data);
 - ✅ 第 13 步 · 接入 MCP（外部工具 / .mcp.json / /mcp [reload]，后台并发启动）
 - ✅ 第 14 步 · 规划 / 子任务分解（todo_write 工具 + /todo，规划能力来自"工具 + 提示"而非编排）
 - ✅ 第 15 步 · 子 agent 隔离（dispatch_agent 工具 + /agents，上下文/预算/存档三重隔离，子 agent 仍是"一个普通工具"）
+- ✅ 第 16 步 · 并行子 agent（concurrent 工具标志 + 异步信号量限流 + allSettled 失败隔离 + 灰度块/短id/配色输出 + 审批互斥锁）
 
 **下一步（规划中）**：
 
-- 🚧 **并行子 agent**：一轮派多个子 agent 并发跑（需配套输出缓冲 + 审批排队）。
-- 🚧 **子 agent 类型/角色**：注册表化（Explore / Plan…）。
-- 之后：多 agent 通信。
+- 🚧 **子 agent 类型/角色**：注册表化（Explore / Plan / critic…），input 加 agent_type。
+- 🚧 **反思与验证闭环**：critic 子 agent + verify 工具（跑测试拿硬信号）+ 返工循环。
+- 之后：agent 间通信（子 agent 之间传消息 / 共享黑板）。
 
 每一步都建议先补测试，再写实现——`FakeLLM` 的模式可以一直复用。
