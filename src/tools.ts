@@ -1,6 +1,6 @@
 import { exec } from "node:child_process";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
-import { dirname } from "node:path";
+import { dirname, resolve } from "node:path";
 import { promisify } from "node:util";
 import { todoWriteTool } from "./todo";
 import type { Tool } from "./types";
@@ -127,29 +127,66 @@ export const calculator: Tool = {
 // ============ 副作用工具（碰文件系统 / 网络 / 进程）============
 // 学习项目刻意只做最简实现，把“护栏”留成 TODO，方便看清核心。
 
-// 工具 3：读取文件内容。
+// 分页 read 的默认值(第19步)。
+const READ_DEFAULT_LIMIT = 2000; // 默认读多少行
+const READ_MAX_LINE = 2000; // 单行最长多少字符(超长省略,防压缩行炸上下文)
+
+// 工具 3：读取文件内容（分页 + 带行号）。
+// 行号是为了让模型定位、报 file:line、决定下一段读哪;⚠️ Edit 的 old_string 用【真实内容】,
+// 不含这里显示的「行号 + Tab」前缀。见 docs/19。
 export const readFileTool: Tool = {
   name: "read_file",
-  description: "读取一个文本文件的内容并返回（UTF-8）。",
+  description:
+    "读取文本文件并返回带行号的内容（UTF-8）。大文件用 offset/limit 分页读。" +
+    `默认从头读 ${READ_DEFAULT_LIMIT} 行,单行超 ${READ_MAX_LINE} 字符会省略。\n` +
+    "⚠️ 输出每行前缀是「行号+Tab」,仅供定位;用 Edit 时 old_string 要用文件【真实内容】,不含该前缀。",
   dangerous: true, // 能读到密钥/隐私文件，且可能被外发 → 需确认
   inputSchema: {
     type: "object",
     properties: {
       path: { type: "string", description: "文件路径（相对路径相对于进程工作目录）" },
+      offset: { type: "number", description: `起始行号(从 1 起,默认 1)` },
+      limit: { type: "number", description: `读取行数(默认 ${READ_DEFAULT_LIMIT})` },
     },
     required: ["path"],
   },
   // TODO: 路径沙箱 —— 限制在工作目录内，防止路径穿越 / 越权读取（如 ../../etc/passwd）。
   async run(input, ctx) {
     const path = String(input.path ?? "");
-    return truncate(await readFile(path, { encoding: "utf-8", signal: ctx?.signal }));
+    const raw = await readFile(path, { encoding: "utf-8", signal: ctx?.signal });
+    // 读成功即记入本 agent 的「已读集合」,满足 Edit 的 read-before-edit。
+    ctx?.readFiles?.add(resolve(path));
+
+    const lines = raw.split("\n");
+    const total = lines.length;
+    const offset = Math.max(1, Math.floor(Number(input.offset) || 1));
+    const limit = Math.max(1, Math.floor(Number(input.limit) || READ_DEFAULT_LIMIT));
+    const start = offset - 1;
+    const slice = lines.slice(start, start + limit);
+    // 行号右对齐 + Tab + 内容(单行超长省略)。
+    const width = String(start + slice.length).length;
+    const body = slice
+      .map((line, i) => {
+        const no = String(start + i + 1).padStart(width);
+        const text = line.length > READ_MAX_LINE ? line.slice(0, READ_MAX_LINE) + "…（本行已截断）" : line;
+        return `${no}\t${text}`;
+      })
+      .join("\n");
+    const shownEnd = start + slice.length;
+    const more =
+      shownEnd < total
+        ? `\n…（共 ${total} 行,已显示 ${offset}-${shownEnd};继续用 offset=${shownEnd + 1}）`
+        : "";
+    return `${body}${more}`;
   },
 };
 
-// 工具 4：写入文件（覆盖写，自动创建父目录）。
+// 工具 4：写入文件（覆盖写，自动创建父目录）—— 管【新建 / 整文件重写】;改一处用 Edit。
 export const writeFileTool: Tool = {
   name: "write_file",
-  description: "把文本写入文件（覆盖已有内容，自动创建缺失的父目录）。",
+  description:
+    "把文本写入文件（覆盖已有内容，自动创建缺失的父目录）。用于新建文件或整文件重写;" +
+    "只改其中一处请用 edit_file。",
   dangerous: true, // 改文件系统 → 需确认
   inputSchema: {
     type: "object",
@@ -165,9 +202,77 @@ export const writeFileTool: Tool = {
     const content = String(input.content ?? "");
     await mkdir(dirname(path), { recursive: true });
     await writeFile(path, content, { encoding: "utf-8", signal: ctx?.signal });
+    // 写了即知内容,记入已读集合,之后可直接 Edit。
+    ctx?.readFiles?.add(resolve(path));
     return `已写入 ${content.length} 个字符到 ${path}`;
   },
 };
+
+// 工具 5：精确编辑（字符串替换）—— 改文件某一处。见 docs/19、ADR-0005。
+export const editFileTool: Tool = {
+  name: "edit_file",
+  description:
+    "精确编辑文件:把 old_string 替换成 new_string。old_string 必须【唯一命中】(含缩进/空白," +
+    "用文件真实内容、不含 read 的行号前缀);命中 0 次或多次会报错——请扩上下文,或用 replace_all 批量替。" +
+    "new_string 留空即删除那段。⚠️ 必须先 read_file 读过该文件再编辑。改一处用它;新建/整体重写用 write_file。",
+  dangerous: true, // 改文件系统 → 需确认
+  inputSchema: {
+    type: "object",
+    properties: {
+      path: { type: "string", description: "文件路径" },
+      old_string: { type: "string", description: "要被替换的原文(唯一命中;含缩进空白,不含行号前缀)" },
+      new_string: { type: "string", description: "替换成的新文本(留空=删除)" },
+      replace_all: { type: "boolean", description: "命中多处时是否全部替换,默认 false" },
+    },
+    required: ["path", "old_string", "new_string"],
+  },
+  async run(input, ctx) {
+    const path = String(input.path ?? "");
+    const oldStr = String(input.old_string ?? "");
+    const newStr = String(input.new_string ?? "");
+    const replaceAll = input.replace_all === true;
+
+    // read-before-edit:没读过该文件不许改(防盲改/陈旧)。ctx.readFiles 为空则跳过(库外直接调用)。
+    if (ctx?.readFiles && !ctx.readFiles.has(resolve(path))) {
+      throw new Error(`必须先 read_file 读过 ${path} 再 edit_file（防止盲改/改到陈旧内容）`);
+    }
+    if (oldStr === "") throw new Error("old_string 不能为空");
+
+    const raw = await readFile(path, { encoding: "utf-8", signal: ctx?.signal });
+    // 统计命中次数(用 split 计数,避免正则转义)。
+    const count = raw.split(oldStr).length - 1;
+    if (count === 0) {
+      throw new Error(`未找到 old_string（在 ${path} 中 0 次命中）——请给更精确/更长的上下文`);
+    }
+    if (count > 1 && !replaceAll) {
+      throw new Error(
+        `old_string 命中 ${count} 次、不唯一——请扩大上下文使其唯一,或传 replace_all: true 批量替换`,
+      );
+    }
+    const next = replaceAll ? raw.split(oldStr).join(newStr) : raw.replace(oldStr, newStr);
+    await writeFile(path, next, { encoding: "utf-8", signal: ctx?.signal });
+
+    // 回显:替换处数 + 改动处前后小片段(取 new_string 落点周围几行),便于确认改对地方。
+    const idx = next.indexOf(newStr);
+    const around = idx >= 0 ? snippet(next, idx, newStr.length) : "";
+    const n = replaceAll ? count : 1;
+    return `已在 ${path} 替换 ${n} 处${around ? `：\n${around}` : ""}`;
+  },
+};
+
+// 取 next 中 [idx, idx+len) 附近的几行,给 Edit 回显用。
+function snippet(text: string, idx: number, len: number): string {
+  const before = text.lastIndexOf("\n", idx) + 1;
+  const afterNl = text.indexOf("\n", idx + len);
+  const end = afterNl === -1 ? text.length : afterNl;
+  // 往前后各扩一行,给点上下文。
+  const ctxStart = text.lastIndexOf("\n", before - 2) + 1;
+  const ctxEnd = (() => {
+    const nl = text.indexOf("\n", end + 1);
+    return nl === -1 ? text.length : nl;
+  })();
+  return truncate(text.slice(ctxStart, ctxEnd));
+}
 
 // 工具 5：发起 HTTP 请求。
 export const httpRequestTool: Tool = {
@@ -248,6 +353,7 @@ export const defaultTools: Tool[] = [
   calculator,
   readFileTool,
   writeFileTool,
+  editFileTool, // 第19步:精确编辑(字符串替换 + read-before-edit)
   httpRequestTool,
   shellTool,
   todoWriteTool, // 第14步:任务规划(无状态 todo 清单,见 src/todo.ts)

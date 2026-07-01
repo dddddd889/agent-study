@@ -104,6 +104,8 @@ export class Agent {
   private onApprove?: AgentOptions["onApprove"];
   // 本会话内「总是允许」的危险工具名（选了 always 的）。
   private alwaysAllowed = new Set<string>();
+  // 本 Agent 读过的文件（绝对路径）。供 Edit 强制「先读再改」;每个 Agent 各一份(见 docs/19)。
+  private readFiles = new Set<string>();
   private history: Message[] = [];
 
   constructor(llm: LLM, opts: AgentOptions = {}) {
@@ -410,7 +412,7 @@ export class Agent {
       return { content: `未知工具: ${call.name}`, isError: true };
     }
     try {
-      const out = await tool.run(call.input, { signal });
+      const out = await tool.run(call.input, { signal, readFiles: this.readFiles });
       return { content: String(out), isError: false };
     } catch (err) {
       if (signal?.aborted) throw err; // 用户中断 → 上抛
@@ -456,5 +458,6 @@ export class Agent {
 
   reset(): void {
     this.history = [];
+    this.readFiles.clear(); // 清空「已读集合」,新会话须重新 read 再 Edit
   }
 }

@@ -42,6 +42,10 @@ export interface Message {
 export interface ToolContext {
   // 中断信号：abort 后，会阻塞的工具（http / shell / 读写文件）应尽快停止。
   signal?: AbortSignal;
+  // 每个 Agent 自己的「已读文件集合」(运行时、非持久)。read_file/write_file 成功后把
+  // 文件绝对路径记进来;Edit 据此强制「先读再改」(read-before-edit)。主/子 agent 各一份,
+  // 天然隔离、不串味。见 docs/19、ADR-0005。
+  readFiles?: Set<string>;
 }
 
 // 一个工具 = 给模型看的「说明书」(name/description/inputSchema)

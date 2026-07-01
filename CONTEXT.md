@@ -71,6 +71,16 @@ _Avoid_：子会话、子日志
 主 agent 在同一轮里同时派出多个子 agent 并发执行、一起收结（受并发上限约束）。仅当该轮工具调用全为 `concurrent` 工具时发生，否则退回串行。
 _Avoid_：多开、并发子任务
 
+### 文件编辑
+
+**Edit（精确编辑）**：
+通过「唯一命中的字符串替换」精确改文件某一处的工具（`old_string → new_string`，默认要求命中唯一）。区别于 `write_file`（整文件新建/重写）。空 `new_string` 即删除那段。
+_Avoid_：patch（那是未来的 `apply_patch`）、改写、修改
+
+**先读再改（read-before-edit）**：
+一条不变量：`Edit` 前必须先 `read_file`（或 `write_file`）读过该文件。每个 agent 各记一份「已读集合」（运行时、非持久），防盲改与陈旧。
+_Avoid_：读写校验
+
 ### 反思与验证
 
 **critic（审查子 agent）**：

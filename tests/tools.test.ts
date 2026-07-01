@@ -20,7 +20,7 @@ describe("文件工具", () => {
     expect(w).toContain(path);
 
     const r = await readFileTool.run({ path });
-    expect(r).toBe("你好，工具");
+    expect(r).toBe("1\t你好，工具"); // 现在带行号前缀(第19步分页 read)
   });
 
   test("read_file 读不存在的文件会抛错", async () => {
