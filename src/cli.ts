@@ -221,10 +221,10 @@ async function main() {
     getTools: currentTools,
     getSessionId,
     onApprove,
-    // 子 agent 启动:主层(█)打一条,按类型区分「派出子 agent」/「请 critic 审查」。
-    onSubStart: (id: string, prompt: string, kind: "dispatch" | "critic") =>
+    // 子 agent 启动:主层(█)打一条,按角色区分「请 critic 审查」/「派出 <角色> 子 agent」。
+    onSubStart: (id: string, prompt: string, roleType: string) =>
       emit(
-        `\n█ ${kind === "critic" ? "请 critic 审查" : "派出子 agent"} ${paintSub(id, `▓${id}`)}：${prompt.replace(/\s+/g, " ")}`,
+        `\n█ ${roleType === "critic" ? "请 critic 审查" : `派出 ${roleType} 子 agent`} ${paintSub(id, `▓${id}`)}：${prompt.replace(/\s+/g, " ")}`,
       ),
     // 子 agent 过程:缩进(深度1)+ 灰度块 ▓ + 短 id;【只给 ▓<id> 标记上色】,正文默认色。
     // 并行交织时,靠这个彩色标记一眼分清是哪个子 agent(docs/16)。经 emit:审批期间先缓冲。

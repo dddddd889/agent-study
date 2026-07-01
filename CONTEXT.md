@@ -37,8 +37,16 @@ _Avoid_：对话、conversation（指落盘单位时）
 _Avoid_：父 agent、根 agent
 
 **子 agent（subagent）**：
-由主 agent 派生的、**上下文隔离**的独立 Agent 实例；自主跑完一个子任务后只把**结论**交回主 agent。子 agent 不能再派子 agent。
+由主 agent 派生的、**上下文隔离**的独立 Agent 实例；自主跑完一个子任务后只把**结论**交回主 agent。子 agent 不能再派子 agent、也不能请 critic（两个会起子 agent 的工具都被剔除）。
 _Avoid_：子任务、worker、子进程、child
+
+**角色 / agent_type（subagent role）**：
+子 agent 的预设身份 = 一段 system 提示 + 一套工具裁法，决定它「怎么想、能用什么」。内置 `general`（通用干活，默认）/ `explore`（只读探索）/ `plan`（只读规划）/ `critic`（对抗性审查）。
+_Avoid_：类型（单说时泛指）、模式、人格
+
+**角色注册表（role registry）**：
+集中登记所有角色配置（system、工具裁法 `exclude`、预算、暴露方式）的单一真相表（`src/roles.ts`）。加角色 = 加一行表项。prompt 式角色经 `dispatch_agent` 的 `agent_type` 选择；结构化输入的角色（critic）配置也在表里、但暴露为独立工具。
+_Avoid_：配置表（泛指）、agent 列表
 
 **dispatch_agent**：
 主 agent 用来派发子任务的工具。它本身非危险（副作用发生在子 agent 内部的具体工具上），也不计辅助（算一步干活）。
