@@ -18,7 +18,7 @@ import {
 } from "./subagent";
 import { latestTodos, renderTodos } from "./todo";
 import { defaultTools } from "./tools";
-import type { Tool } from "./types";
+import type { Tool, Usage } from "./types";
 
 // 子 agent 显示配色(第16步):每个【新出现】的子 agent 按顺序分到下一个调色板颜色,
 // 保证同时出现的多个子 agent 颜色互不相同(超过调色板数量才回卷);同一 id 本会话内恒定同色。
@@ -235,6 +235,8 @@ async function main() {
       emit(`\n  ${paintSub(id, `▓${id}`)} 调用 ${name}(${JSON.stringify(input)})`),
     onSubToolResult: (id: string, { name, content, isError }: { name: string; content: string; isError: boolean }) =>
       emit(`  ${paintSub(id, `▓${id}`)} ${name} ${isError ? "出错" : "结果"}：${content}`),
+    // 子 agent 跑完回传总用量 → 按短 id 记进主 Agent(第22步 /context 按 id 分列)。
+    onSubUsage: (id: string, u: Usage) => agent.recordSubUsage(id, u),
   };
   dispatchTool = createDispatchAgentTool(subDeps);
   criticTool = createCriticTool(subDeps);
@@ -370,8 +372,23 @@ async function main() {
     if (text === "/context") {
       const s = agent.contextStats();
       console.log(
-        `上下文：~${s.tokens} token · ${s.messages} 条消息 · ${s.turns} 轮 · 含摘要 ${s.hasSummary ? "✓" : "✗"} · 软上限 ${s.maxContextTokens}\n`,
+        `上下文：~${s.tokens} token · ${s.messages} 条消息 · ${s.turns} 轮 · 含摘要 ${s.hasSummary ? "✓" : "✗"} · 软上限 ${s.maxContextTokens}`,
       );
+      // 提示词缓存(第22步):本会话累计用量,主 agent 与子 agent 分开显示。数值单位=token。
+      const state = process.env.AGENT_CACHE === "0"
+        ? "已关闭"
+        : `TTL ${process.env.AGENT_CACHE_TTL === "1h" ? "1h" : "5m"}`;
+      const line = (label: string, u: Usage) => {
+        const denom = u.cacheRead + u.input + u.cacheCreation;
+        const hit = denom > 0 ? Math.round((u.cacheRead / denom) * 100) : 0;
+        return `${label}：命中率 ${hit}% · 读 ${u.cacheRead} · 写 ${u.cacheCreation} · 未缓存 ${u.input} · 输出 ${u.output}`;
+      };
+      console.log(`${line("缓存·主对话", s.usage.main)} · ${state}（token,本会话累计）`);
+      // 每个子 agent 按短 id 单列(id 与 /agents、agent-<id>.jsonl 对齐)。
+      for (const { id, usage } of s.usage.sub) {
+        console.log(line(`缓存·子 ${paintSub(id, `▓${id}`)}`, usage));
+      }
+      console.log("");
       continue;
     }
     if (text === "/memory") {

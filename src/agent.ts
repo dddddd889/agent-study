@@ -12,6 +12,7 @@ import type {
   Tool,
   ToolResultBlock,
   ToolUseBlock,
+  Usage,
 } from "./types";
 
 // 摘要消息的标记前缀(置顶 user 消息),也用于 contextStats 判断「是否含摘要」。
@@ -62,6 +63,15 @@ export interface AgentOptions {
   }) => Promise<"once" | "always" | "deny">;
 }
 
+// 把一次调用的用量累加进目标桶(缺省则跳过)。第22步缓存观测用。
+function addUsageInto(dst: Usage, src?: Usage): void {
+  if (!src) return;
+  dst.input += src.input;
+  dst.output += src.output;
+  dst.cacheRead += src.cacheRead;
+  dst.cacheCreation += src.cacheCreation;
+}
+
 // 极简异步信号量:限制同时在飞的任务数(并行子 agent 的并发上限)。
 // run() 里超额就 await 排队,有任务结束就唤醒一个等待者。JS 单线程,计数无需加锁。
 class Semaphore {
@@ -106,6 +116,10 @@ export class Agent {
   private alwaysAllowed = new Set<string>();
   // 本 Agent 读过的文件（绝对路径）。供 Edit 强制「先读再改」;每个 Agent 各一份(见 docs/19)。
   private readFiles = new Set<string>();
+  // 本会话累计 token 用量(含缓存读写),供 /context 观测(第22步)。reset/new 清零。
+  // 分桶:main = 主循环 + 摘要;sub = 【按子 agent 短 id】各自汇总(id 与 /agents、agent-<id>.jsonl 对齐)。
+  private usageMain: Usage = { input: 0, output: 0, cacheRead: 0, cacheCreation: 0 };
+  private usageSub = new Map<string, Usage>();
   private history: Message[] = [];
 
   constructor(llm: LLM, opts: AgentOptions = {}) {
@@ -190,6 +204,7 @@ export class Agent {
           chunk = await it.next();
         }
         const res = chunk.value;
+        this.addUsage(res.usage); // 累计本会话用量(含缓存读写),供 /context 观测
         signal?.throwIfAborted();
 
         // 被 max_tokens 截断 => 这次输出是残缺的，直接报清楚错。
@@ -289,13 +304,37 @@ export class Agent {
     }
   }
 
-  // 当前上下文构成，供 /context 等观测用。
+  // 累加主 agent 自己一次调用的用量(主循环/摘要都算主桶;缺省则跳过)。见第22步。
+  private addUsage(u?: Usage): void {
+    addUsageInto(this.usageMain, u);
+  }
+
+  // 记入某个子 agent(按短 id)回传的总用量(由 CLI 的 onSubUsage 调用)。见第22步。
+  recordSubUsage(id: string, u?: Usage): void {
+    if (!u) return;
+    let bucket = this.usageSub.get(id);
+    if (!bucket) {
+      bucket = { input: 0, output: 0, cacheRead: 0, cacheCreation: 0 };
+      this.usageSub.set(id, bucket);
+    }
+    addUsageInto(bucket, u);
+  }
+
+  // 本 agent(含摘要)+ 所有子 agent 的合计用量,供外层(如子 agent 回传给上级)读取。
+  totalUsage(): Usage {
+    const total = { ...this.usageMain };
+    for (const u of this.usageSub.values()) addUsageInto(total, u);
+    return total;
+  }
+
+  // 当前上下文构成，供 /context 等观测用。usage.main = 主循环+摘要;usage.sub = 按子 agent id 分列。
   contextStats(): {
     tokens: number;
     messages: number;
     turns: number;
     hasSummary: boolean;
     maxContextTokens: number;
+    usage: { main: Usage; sub: Array<{ id: string; usage: Usage }> };
   } {
     return {
       tokens: estimateTokens(this.history),
@@ -308,6 +347,11 @@ export class Agent {
           m.content.startsWith(SUMMARY_PREFIX),
       ),
       maxContextTokens: this.maxContextTokens,
+      usage: {
+        main: { ...this.usageMain },
+        // Map 保持插入序 → 按「派出先后」列出每个子 agent。
+        sub: [...this.usageSub.entries()].map(([id, usage]) => ({ id, usage: { ...usage } })),
+      },
     };
   }
 
@@ -378,6 +422,7 @@ export class Agent {
       text += step.value;
       step = await it.next();
     }
+    this.addUsage(step.value.usage); // 摘要这次调用的用量也计入本会话
     return text || this.extractText(step.value.content);
   }
 
@@ -459,5 +504,7 @@ export class Agent {
   reset(): void {
     this.history = [];
     this.readFiles.clear(); // 清空「已读集合」,新会话须重新 read 再 Edit
+    this.usageMain = { input: 0, output: 0, cacheRead: 0, cacheCreation: 0 }; // 缓存用量清零
+    this.usageSub.clear();
   }
 }

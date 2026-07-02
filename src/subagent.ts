@@ -8,7 +8,7 @@ import {
   type Role,
 } from "./roles";
 import { appendSubagentMessages } from "./session";
-import type { LLM, Message, Tool } from "./types";
+import type { LLM, Message, Tool, Usage } from "./types";
 
 // 第 15/16/17/18 步:子 agent —— 把一件事甩给一个【上下文隔离】的子 agent,只收回结论。
 //
@@ -48,6 +48,8 @@ export interface SubagentDeps {
   ) => void;
   // 覆盖子 agent 步数上限(测试用);优先级高于角色的 maxSteps。
   maxSteps?: number;
+  // 子 agent 跑完回传它的短 id + 总 token 用量(含缓存读写),供主层【按 id】分列(第22步)。
+  onSubUsage?: (id: string, usage: Usage) => void;
 }
 
 // 随机短 id(6 位十六进制):天然唯一、并发也不撞。用作存档名/显示前缀/配色锚点。
@@ -157,6 +159,10 @@ async function runSubagent(
       { role: "assistant", content: conclusion },
     ]);
   }
+
+  // 回传这个子 agent 的总 token 用量(含它内部的摘要),供主层归到「子 agent」桶。
+  // 注:撞满步数走 finalizeOnBudget 那次直连 llm 的用量未计入(边角,忽略)。
+  deps.onSubUsage?.(id, sub.totalUsage());
 
   if (!conclusion) {
     throw new Error(`子 agent ${id} 未产出结论(工具连续失败或收尾为空)`);

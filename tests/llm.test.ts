@@ -47,8 +47,14 @@ describe("AnthropicLLM 请求构造", () => {
     expect(headers["x-api-key"]).toBeUndefined();
 
     const body = JSON.parse(captured.init.body as string);
-    expect(body.system).toBe("sys");
-    expect(body.messages).toEqual([{ role: "user", content: "hi" }]);
+    // 第22步:默认开启提示词缓存 → system 数组化并挂 cache_control(断点①),
+    // 最后一条 message 末块也挂 cache_control(断点②)。
+    expect(body.system).toEqual([
+      { type: "text", text: "sys", cache_control: { type: "ephemeral" } },
+    ]);
+    expect(body.messages).toEqual([
+      { role: "user", content: [{ type: "text", text: "hi", cache_control: { type: "ephemeral" } }] },
+    ]);
   });
 
   test("只有 apiKey 时走 x-api-key", async () => {

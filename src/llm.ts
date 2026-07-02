@@ -4,7 +4,20 @@ import type {
   LLM,
   LLMResponse,
   Message,
+  Usage,
 } from "./types";
+
+// 给内容块挂缓存断点(第22步)。content 可能是字符串(转成单个 text 块)或块数组
+// (克隆后在最后一块加 cache_control);空/异常原样返回。绝不改传入对象。
+function withCacheControl(content: unknown, cc: Record<string, string>): unknown {
+  if (typeof content === "string") {
+    return [{ type: "text", text: content, cache_control: cc }];
+  }
+  if (Array.isArray(content) && content.length > 0) {
+    return [...content.slice(0, -1), { ...content[content.length - 1], cache_control: cc }];
+  }
+  return content;
+}
 
 export interface AnthropicLLMOptions {
   apiKey?: string;
@@ -44,6 +57,9 @@ export class AnthropicLLM implements LLM {
   private retryBaseMs: number;
   private retryCapMs: number;
   private onRetry?: AnthropicLLMOptions["onRetry"];
+  // 提示词缓存(第22步):AGENT_CACHE=0 关闭;AGENT_CACHE_TTL=1h 切 1 小时(默认 5 分钟)。
+  private cacheEnabled: boolean;
+  private cacheTtl?: "1h";
 
   constructor(opts: AnthropicLLMOptions = {}) {
     this.authToken = opts.authToken ?? process.env.ECHO_TECH_ANTHROPIC_AUTH_TOKEN;
@@ -75,6 +91,14 @@ export class AnthropicLLM implements LLM {
     this.retryBaseMs = opts.retryBaseMs ?? 500;
     this.retryCapMs = opts.retryCapMs ?? 8000;
     this.onRetry = opts.onRetry;
+    this.cacheEnabled = process.env.AGENT_CACHE !== "0"; // 默认开
+    this.cacheTtl = process.env.AGENT_CACHE_TTL === "1h" ? "1h" : undefined; // 默认 5min
+  }
+
+  // 当前缓存断点用的 cache_control(关闭时返回 undefined)。
+  private cacheControl(): Record<string, string> | undefined {
+    if (!this.cacheEnabled) return undefined;
+    return this.cacheTtl ? { type: "ephemeral", ttl: this.cacheTtl } : { type: "ephemeral" };
   }
 
   private buildHeaders(): Record<string, string> {
@@ -94,11 +118,29 @@ export class AnthropicLLM implements LLM {
   // 拼请求体。stream=true 时让 API 走 SSE 流式返回。
   private buildBody(messages: Message[], opts: CompleteOptions, stream: boolean) {
     const { system, tools } = opts;
+    const cc = this.cacheControl();
+
+    // 断点①:system 末尾。渲染序是 tools→system→messages,一个断点在 system 末尾
+    // 会【连带缓存它前面的 tools】。开启缓存时把 system 串数组化以便挂 cache_control。
+    const systemField = system
+      ? cc
+        ? [{ type: "text", text: system, cache_control: cc }]
+        : system
+      : undefined;
+
+    // content 直接透传;开启缓存时给【最后一条 message 的末块】挂断点②(缓存增长的对话)。
+    // 用 withCacheControl 克隆,绝不改传入的 this.history。
+    const outMessages = messages.map((m) => ({ role: m.role, content: m.content as unknown }));
+    if (cc && outMessages.length > 0) {
+      const last = outMessages[outMessages.length - 1]!;
+      last.content = withCacheControl(last.content, cc);
+    }
+
     return JSON.stringify({
       model: this.model,
       max_tokens: this.maxTokens,
       ...(stream ? { stream: true } : {}),
-      ...(system ? { system } : {}),
+      ...(systemField ? { system: systemField } : {}),
       // 把工具的「说明书」传给模型（run 是本地逻辑，不发给 API）。
       ...(tools && tools.length
         ? {
@@ -109,8 +151,7 @@ export class AnthropicLLM implements LLM {
             })),
           }
         : {}),
-      // content 直接透传：字符串或内容块数组（含 tool_use / tool_result）都合法。
-      messages: messages.map((m) => ({ role: m.role, content: m.content })),
+      messages: outMessages,
     });
   }
 
@@ -131,6 +172,8 @@ export class AnthropicLLM implements LLM {
     const blocks: ContentBlock[] = [];
     const toolJson: string[] = []; // index -> 累积的 tool_use 参数 JSON 碎片
     let stopReason = "end_turn";
+    // token 用量(含缓存读写):message_start 给输入/缓存,message_delta 给最终输出。
+    const usage: Usage = { input: 0, output: 0, cacheRead: 0, cacheCreation: 0 };
 
     for await (const evt of parseSSE(res.body)) {
       switch (evt.type) {
@@ -164,15 +207,27 @@ export class AnthropicLLM implements LLM {
           }
           break;
         }
-        case "message_delta": {
-          if (evt.delta?.stop_reason) stopReason = evt.delta.stop_reason;
+        case "message_start": {
+          // message_start.message.usage 带输入/缓存读写(以及初始 output)。
+          const u = evt.message?.usage;
+          if (u) {
+            usage.input = u.input_tokens ?? 0;
+            usage.cacheRead = u.cache_read_input_tokens ?? 0;
+            usage.cacheCreation = u.cache_creation_input_tokens ?? 0;
+            usage.output = u.output_tokens ?? 0;
+          }
           break;
         }
-        // message_start / message_stop 不需要特殊处理
+        case "message_delta": {
+          if (evt.delta?.stop_reason) stopReason = evt.delta.stop_reason;
+          if (evt.usage?.output_tokens != null) usage.output = evt.usage.output_tokens; // 最终输出
+          break;
+        }
+        // message_stop 不需要特殊处理
       }
     }
 
-    return { stopReason, content: blocks.filter(Boolean) };
+    return { stopReason, content: blocks.filter(Boolean), usage };
   }
 
   // 非流式版本（保留作参考实现 + 现有测试用，不在 LLM 接口里）。

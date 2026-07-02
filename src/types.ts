@@ -72,6 +72,18 @@ export interface Tool {
 }
 
 // ============ LLM 抽象 ============
+// 单次模型调用的 token 用量(第22步:提示词缓存观测)。
+//   input         : 未命中缓存、按全价计的输入 token
+//   output        : 输出 token
+//   cacheRead     : 从缓存读取的输入 token(~0.1× 价)
+//   cacheCreation : 写入缓存的输入 token(5min TTL ~1.25× 价)
+export interface Usage {
+  input: number;
+  output: number;
+  cacheRead: number;
+  cacheCreation: number;
+}
+
 // 引入工具后，单次回复不再只是一段文本：它可能包含 tool_use 块，
 // 还需要 stopReason 来判断「是否要继续循环」。
 export interface LLMResponse {
@@ -79,6 +91,8 @@ export interface LLMResponse {
   stopReason: string;
   // assistant 这一步产出的内容块（文本 + 可能的 tool_use）。
   content: ContentBlock[];
+  // 本次调用的 token 用量(含缓存读写),供 /context 观测;不支持时可缺省。
+  usage?: Usage;
 }
 
 export interface CompleteOptions {
