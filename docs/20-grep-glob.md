@@ -28,6 +28,13 @@
 - **硬编码基线（始终跳）**：`.git`、`node_modules`、`.DS_Store` —— 没 `.gitignore` 也不裸奔。
 - **简化 `.gitignore`**（只读工作区根那一个）：支持普通名（`dist`）、目录式（`dist/`）、后缀（`*.log`）、前导锚定（`/build`）；**不支持**否定 `!`、子目录嵌套 `.gitignore`、复杂 `**` 组合（留 TODO）。
 
+## 搜被忽略的目录：`no_ignore`
+
+默认跳 `.gitignore` 很合理，但当你**明确想看被忽略的目录**（如 `tmp/`、`.sessions/`）时，glob 会静默返回空、模型只好绕回 `shell ls`——违背初衷。两点补救：
+
+- **空结果会解释原因**：`（无匹配 tmp/**/*；注意默认跳过 .gitignore 目录(如 tmp/),要搜它们传 no_ignore: true）` —— 把「为什么空 + 怎么办」写进消息，模型能自我纠正。
+- **`no_ignore: true`**（glob/grep 都有，对标 ripgrep 的 `--no-ignore`）：连 `.gitignore` 忽略的也搜，但**仍跳** `.git`/`node_modules` 基线。
+
 ## `glob` 免审批、`grep` 走审批（防读绕过）
 
 - **`glob` 非 `dangerous`**：只返回文件名，风险低 → 免审批，搜起来顺。

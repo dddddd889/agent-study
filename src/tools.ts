@@ -2,6 +2,7 @@ import { exec } from "node:child_process";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
 import { promisify } from "node:util";
+import { applyPatchTool } from "./patch";
 import { globTool, grepTool } from "./search";
 import { todoWriteTool } from "./todo";
 import type { Tool } from "./types";
@@ -357,6 +358,7 @@ export const defaultTools: Tool[] = [
   readFileTool,
   writeFileTool,
   editFileTool, // 第19步:精确编辑(字符串替换 + read-before-edit)
+  applyPatchTool, // 第21步:跨文件原子补丁(Codex 风格)
   globTool, // 第20步:按名找文件(只读,免审批)
   grepTool, // 第20步:按内容搜(含内容→dangerous)
   httpRequestTool,

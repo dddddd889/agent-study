@@ -81,6 +81,10 @@ _Avoid_：patch（那是未来的 `apply_patch`）、改写、修改
 一条不变量：`Edit` 前必须先 `read_file`（或 `write_file`）读过该文件。每个 agent 各记一份「已读集合」（运行时、非持久），防盲改与陈旧。
 _Avoid_：读写校验
 
+**补丁（apply_patch）**：
+一次性、跨多文件、可增删文件的**原子**编辑（Codex 风格 diff）。区别于 `Edit`（单处）/ `write_file`（单文件重写）。靠**上下文内容定位**（非行号）、全或无应用。
+_Avoid_：diff、打补丁（口语）
+
 ### 反思与验证
 
 **critic（审查子 agent）**：

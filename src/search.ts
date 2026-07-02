@@ -51,8 +51,9 @@ function segmentGlobToRegExp(pat: string): RegExp {
 }
 
 // 某个相对路径(用 / 分隔)是否该跳过。relPath 是相对遍历根的路径。
-function makeSkipper(root: string): (relPath: string) => boolean {
-  const rules = parseGitignore(root);
+// noIgnore=true 时只按硬编码基线跳(不读 .gitignore),用于「就要搜被忽略的目录(如 tmp/)」。
+function makeSkipper(root: string, noIgnore = false): (relPath: string) => boolean {
+  const rules = noIgnore ? [] : parseGitignore(root);
   return (relPath: string): boolean => {
     const segs = relPath.split("/");
     const base = segs[segs.length - 1]!;
@@ -75,8 +76,9 @@ async function walkFiles(
   root: string,
   onFile: (relPath: string, absPath: string) => Promise<void> | void,
   signal?: AbortSignal,
+  noIgnore = false,
 ): Promise<{ truncated: boolean }> {
-  const skip = makeSkipper(root);
+  const skip = makeSkipper(root, noIgnore);
   let count = 0;
   let truncated = false;
 
@@ -129,13 +131,18 @@ export const globTool: Tool = {
   name: "glob",
   description:
     "按文件名模式查找文件,返回匹配的相对路径列表(不返回内容)。" +
-    "支持 * (段内)、** (任意层)、? 。例:src/**/*.ts、**/*.test.ts。只读、快速、自动跳过 .git/node_modules 及 .gitignore。",
+    "支持 * (段内)、** (任意层)、? 。例:src/**/*.ts、**/*.test.ts。只读、快速。" +
+    "默认跳过 .git/node_modules 及 .gitignore 命中的目录;要搜被忽略的目录(如 tmp/、.sessions/)传 no_ignore: true。",
   dangerous: false, // 只返回路径,安全 → 免审批
   inputSchema: {
     type: "object",
     properties: {
       pattern: { type: "string", description: "glob 模式,如 src/**/*.ts" },
       path: { type: "string", description: "基准目录,默认当前工作目录" },
+      no_ignore: {
+        type: "boolean",
+        description: "为 true 则连 .gitignore 忽略的目录也搜(仍跳 .git/node_modules)。默认 false。",
+      },
     },
     required: ["pattern"],
   },
@@ -143,6 +150,7 @@ export const globTool: Tool = {
     const pattern = String(input.pattern ?? "");
     if (!pattern) throw new Error("glob 需要 pattern");
     const root = resolve(String(input.path ?? "."));
+    const noIgnore = input.no_ignore === true;
     const re = globToRegExp(pattern);
     const hits: string[] = [];
     let capped = false;
@@ -156,8 +164,12 @@ export const globTool: Tool = {
         if (re.test(rel)) hits.push(rel);
       },
       ctx?.signal,
+      noIgnore,
     );
-    if (!hits.length) return `（无匹配 ${pattern}）`;
+    if (!hits.length) {
+      const hint = noIgnore ? "" : "；注意默认跳过 .gitignore 目录(如 tmp/),要搜它们传 no_ignore: true";
+      return `（无匹配 ${pattern}${hint}）`;
+    }
     const note =
       capped || truncated
         ? `\n…（已达上限 ${GLOB_MAX_FILES}/扫描封顶,请收窄 pattern）`
@@ -175,7 +187,8 @@ export const grepTool: Tool = {
   name: "grep",
   description:
     "按正则在文件内容里搜索,返回「相对路径:行号:该行」。可用 glob 限定文件范围。" +
-    "只读检索(比裸 shell grep 更稳:结构化输出、跨平台、跳 .git/node_modules 及 .gitignore)。",
+    "只读检索(比裸 shell grep 更稳:结构化输出、跨平台、跳 .git/node_modules 及 .gitignore)。" +
+    "要搜被 .gitignore 忽略的目录(如 tmp/)传 no_ignore: true。",
   dangerous: true, // 返回文件内容(可能含密钥),与 read_file 一致走审批,堵读绕过
   inputSchema: {
     type: "object",
@@ -184,6 +197,10 @@ export const grepTool: Tool = {
       path: { type: "string", description: "搜索目录(递归)或单文件,默认当前工作目录" },
       glob: { type: "string", description: "可选:只搜匹配此 glob 的文件,如 *.ts" },
       ignore_case: { type: "boolean", description: "忽略大小写,默认 false" },
+      no_ignore: {
+        type: "boolean",
+        description: "为 true 则连 .gitignore 忽略的目录也搜(仍跳 .git/node_modules)。默认 false。",
+      },
     },
     required: ["pattern"],
   },
@@ -197,6 +214,7 @@ export const grepTool: Tool = {
       throw new Error(`非法正则: ${(e as Error).message}`);
     }
     const target = resolve(String(input.path ?? "."));
+    const noIgnore = input.no_ignore === true;
     const fileFilter = input.glob ? globToRegExp(String(input.glob)) : null;
     const hits: string[] = [];
     let capped = false;
@@ -232,10 +250,13 @@ export const grepTool: Tool = {
     if (st.isFile()) {
       await searchOne(relative(process.cwd(), target).split("\\").join("/") || target, target);
     } else {
-      await walkFiles(target, searchOne, ctx?.signal);
+      await walkFiles(target, searchOne, ctx?.signal, noIgnore);
     }
 
-    if (!hits.length) return `（无命中 /${patternStr}/）`;
+    if (!hits.length) {
+      const hint = noIgnore ? "" : "；注意默认跳过 .gitignore 目录(如 tmp/),要搜它们传 no_ignore: true";
+      return `（无命中 /${patternStr}/${hint}）`;
+    }
     const note = capped ? `\n…（已达命中上限 ${GREP_MAX_HITS},请收窄 pattern 或 path）` : "";
     return hits.join("\n") + note;
   },
