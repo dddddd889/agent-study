@@ -98,3 +98,21 @@ _Avoid_：评分、打分、score
 **反思闭环（reflection loop）**：
 「产出 → critic 审查 / 跑测试 → 只为 `[严重]` 问题返工 → 复审」的循环，带迭代上限（最多约两轮、平凡任务不审）。验证的强弱取决于有无硬信号（可跑的测试 = 硬；纯文本判断 = 软）。
 _Avoid_：自我批评、self-critique（特指无隔离、无查验的自评）
+
+### 权限与安全
+
+**权限模式（permission mode）**：
+会话级的审批策略档位，决定各类工具「直接放行 / 弹审批 / 直接拒绝」。四档：`default`（改与执行都问、只读放行）、`acceptEdits`（编辑自动、执行仍问）、`plan`（只读，改与执行一律拒）、`yolo`（全放行）。运行时用 `/mode` 切换、启动读 `AGENT_MODE`。子 agent 派生时继承主 agent 当前模式。
+_Avoid_：权限档、审批档、sandbox（那是路径沙箱）
+
+**工具类别（tool category）**：
+每个工具标注的一个维度 `read`（只读）/ `edit`（改文件）/ `exec`（执行&网络），权限模式据此决策。取代旧的 `dangerous` 布尔标记：`edit`/`exec` 即「危险」、`read` 即「安全」。缺省按 `read`。
+_Avoid_：危险标记、dangerous
+
+**策略（policy）**：
+「工具类别 × 权限模式」查出的三态结果之一：`allow`（不问直接跑）/ `ask`（走人工确认）/ `deny`（不问直接拒，回一条 is_error 说明原因）。优先级：`deny` > 「本会话总是允许」——即 `sessionAllowed` 只在 `ask` 档生效，`plan` 的 `deny` 无视它硬拒。
+_Avoid_：权限、许可
+
+**plan 模式（plan mode）**：
+只读的权限档：改文件/执行命令一律 `deny`；并向 system 注入一行指令，让模型主动产出【方案/计划】而非撞拒绝，需要动手时提示用户切 `acceptEdits`。注意与 plan **角色**（`src/roles.ts` 里的只读规划子 agent 人格）分属不同命名空间，是两回事。
+_Avoid_：规划角色（那是 plan 角色）、只读沙箱

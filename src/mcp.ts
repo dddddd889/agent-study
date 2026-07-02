@@ -210,7 +210,7 @@ function adapt(
   return {
     name: `${server}__${t.name}`,
     description: t.description ?? "",
-    dangerous: true, // 外部工具,统一走人工确认
+    category: "exec", // 外部工具,无法预知是否只读 → 按最保守的 exec(default 问/plan 拒/yolo 放)
     inputSchema: t.inputSchema ?? { type: "object", properties: {} },
     run: async (input) => {
       const res = await client.callTool(t.name, input);

@@ -38,6 +38,13 @@ export interface Message {
 }
 
 // ============ 工具定义 ============
+// 工具类别（第24步：权限模式据此决策）：
+//   read : 只读、无副作用（read_file/grep/glob…）
+//   edit : 改文件（write_file/edit_file/apply_patch）
+//   exec : 执行 & 网络（shell/http_request、MCP 外部工具）
+// 取代旧的 dangerous 布尔：edit/exec 即「危险」、read 即「安全」；缺省按 read。见 src/permission.ts。
+export type ToolCategory = "read" | "edit" | "exec";
+
 // 工具执行的上下文。用对象包装是为了可扩展（以后可加 onProgress / cwd 等）。
 export interface ToolContext {
   // 中断信号：abort 后，会阻塞的工具（http / shell / 读写文件）应尽快停止。
@@ -53,8 +60,8 @@ export interface ToolContext {
 export interface Tool {
   name: string;
   description: string; // 写清楚“什么时候用它”，模型据此决定是否调用
-  // 危险工具（碰文件系统 / 网络 / 进程）执行前需人工确认；纯计算工具为 false/省略。
-  dangerous?: boolean;
+  // 工具类别（read/edit/exec，缺省 read）。权限模式据此决定放行/询问/拒绝。见 src/permission.ts。
+  category?: ToolCategory;
   // 辅助工具（如 todo 记账）：本身不推进任务,调用它【不计入 maxSteps 步数预算】。
   // 否则「每步都更新 todo」会蚕食步数,让真正干活 + 收尾挤不进上限。见 docs/14。
   auxiliary?: boolean;

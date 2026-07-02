@@ -109,8 +109,8 @@ describe("apply_patch 前置校验", () => {
     expect(readFileSync(p, "utf-8")).toBe("here");
   });
 
-  test("apply_patch 是 dangerous、非 concurrent", () => {
-    expect(applyPatchTool.dangerous).toBe(true);
+  test("apply_patch 归 edit 类、非 concurrent", () => {
+    expect(applyPatchTool.category).toBe("edit");
     expect(applyPatchTool.concurrent).toBeFalsy();
   });
 });

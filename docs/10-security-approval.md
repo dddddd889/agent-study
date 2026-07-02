@@ -4,6 +4,8 @@
 
 这是 agent 安全控制的**核心总闸**,装好后所有危险工具都受控。其余具体护栏(路径沙箱、http 超时/SSRF、shell 白名单)本轮留 TODO。
 
+> ⚠️ **后续演进(读本文时留意)**:第 23 步加了[路径沙箱](23-path-sandbox.md);第 24 步把这套「危险工具逐个问 ↔ 全放行」两极升级成 **[权限模式](24-permission-modes.md)**——`Tool.dangerous` 布尔改成**工具类别** `category`(read/edit/exec),`AGENT_ALLOW_ALL` 删除、由 `AGENT_MODE=yolo` 取代。本文记录的是第 10 步**当时**的形态。
+
 ## 哪些算"危险"
 
 原则:**碰文件系统 / 网络 / 进程的工具 = 危险(要确认);纯内存计算的 = 安全。**
@@ -49,19 +51,15 @@ const ask = (q) => new Promise((resolve) => {
 
 因为我们用 Node 的 **`readline`**(零依赖、行式)。**Claude Code 的那种单键/方向键模态**是用 **Ink(React for CLIs)+ raw 模式逐键监听**实现的,不是 readline。要那种体验得引入 Ink/blessed,会破坏"零依赖" → 单键模态留 TODO。
 
-## 放行模式(AGENT_ALLOW_ALL)
+## 放行模式(已由权限模式取代)
 
-无人值守等场景不想逐个确认,可用环境变量一键放行:
+第 10 步曾用 `AGENT_ALLOW_ALL=1` 一键放行(把 `onApprove` 接成恒返回 `"always"`)。**第 24 步删掉了它**——它与新的 `AGENT_MODE=yolo` 完全等价(见 [docs/24](24-permission-modes.md))。现在无人值守用:
 
 ```bash
-AGENT_ALLOW_ALL=1 bun run start
+AGENT_MODE=yolo bun run start   # 一切自动执行、不再确认(⚠ 慎用)
 ```
 
-- 开启后,CLI 把 `onApprove` 接成恒返回 `"always"` → **所有危险工具自动执行、不再弹问**;
-- 启动时打一条**醒目警告**(`⚠ 放行模式…`),避免"忘了开着它"导致 agent 无人值守时乱删/外发;
-- 只认 `"1"`;**默认(不设)仍逐个人工确认** —— 符合"默认关闭、放行需显式 opt-in"。
-
-> ⚠️ 放行模式等于关掉了这道安全闸,`shell` 会裸跑任意命令。仅在你完全清楚后果时用(对标 Claude Code 的 `--dangerously-skip-permissions`)。
+> ⚠️ `yolo` 等于关掉这道安全闸,`shell` 会裸跑任意命令。仅在你完全清楚后果时用(对标 Claude Code 的 `--dangerously-skip-permissions`)。运行时也可 `/mode yolo` 切换。
 
 ## 测试(`bun test`)
 

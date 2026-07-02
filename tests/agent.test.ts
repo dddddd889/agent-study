@@ -333,7 +333,7 @@ describe("Agent 工具调用循环", () => {
     return {
       name: "danger",
       description: "危险操作",
-      dangerous: true,
+      category: "edit",
       inputSchema: { type: "object", properties: {} },
       run,
     };
@@ -384,7 +384,7 @@ describe("Agent 工具调用循环", () => {
     const tool: Tool = {
       name: "danger",
       description: "危险",
-      dangerous: true,
+      category: "edit",
       inputSchema: { type: "object", properties: {} },
       run: () => "ok",
     };
@@ -415,7 +415,7 @@ describe("Agent 工具调用循环", () => {
     const tool: Tool = {
       name: "danger",
       description: "危险",
-      dangerous: true,
+      category: "edit",
       inputSchema: { type: "object", properties: {} },
       run: () => "ok",
     };
@@ -428,7 +428,7 @@ describe("Agent 工具调用循环", () => {
     expect(ran).toHaveLength(0); // 默认拒绝，没执行
   });
 
-  test("安全工具（无 dangerous）不触发 onApprove", async () => {
+  test("只读工具（无 category，默认 read）不触发 onApprove", async () => {
     const tool: Tool = {
       name: "safe",
       description: "安全",

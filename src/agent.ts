@@ -4,6 +4,12 @@ import {
   splitForCompaction,
   truncateHistory,
 } from "./context";
+import {
+  initialMode,
+  modeSystemLine,
+  type PermissionMode,
+  resolvePolicy,
+} from "./permission";
 import type {
   ContentBlock,
   LLM,
@@ -54,9 +60,11 @@ export interface AgentOptions {
   // 一轮的消息「提交到历史」时触发（正常结束 + 中断封口都算），
   // 带本轮新增的消息，供上层持久化（追加落盘）。
   onTurnComplete?: (added: Message[]) => void;
-  // 危险工具（tool.dangerous）执行前的人工确认。返回：
+  // 权限模式（第24步）：会话级审批策略。不填读 AGENT_MODE、再默认 default。见 src/permission.ts。
+  mode?: PermissionMode;
+  // 工具执行前的人工确认，仅在【当前模式对该工具类别判定为 ask】时才调用。返回：
   //   "once" 允许这一次 / "always" 本会话内总是允许该工具 / "deny" 拒绝。
-  // 不提供则危险工具一律默认拒绝（fail closed）。
+  // 不提供则「ask 档」的工具一律默认拒绝（fail closed）。allow/deny 档不经过它。
   onApprove?: (call: {
     name: string;
     input: Record<string, unknown>;
@@ -112,7 +120,9 @@ export class Agent {
   private onCompact?: AgentOptions["onCompact"];
   private onTurnComplete?: AgentOptions["onTurnComplete"];
   private onApprove?: AgentOptions["onApprove"];
-  // 本会话内「总是允许」的危险工具名（选了 always 的）。
+  // 当前权限模式（第24步）：会话级审批策略，可运行时用 setMode 切换。
+  private mode: PermissionMode;
+  // 本会话内「总是允许」的工具名（在 ask 档选了 always 的）。仅在 ask 档生效;deny 无视它。
   private alwaysAllowed = new Set<string>();
   // 本 Agent 读过的文件（绝对路径）。供 Edit 强制「先读再改」;每个 Agent 各一份(见 docs/19)。
   private readFiles = new Set<string>();
@@ -137,6 +147,15 @@ export class Agent {
     this.onCompact = opts.onCompact;
     this.onTurnComplete = opts.onTurnComplete;
     this.onApprove = opts.onApprove;
+    this.mode = opts.mode ?? initialMode();
+  }
+
+  // 权限模式：运行时切换（/mode 命令）与读取（/mode 展示、子 agent 继承）。
+  setMode(mode: PermissionMode): void {
+    this.mode = mode;
+  }
+  getMode(): PermissionMode {
+    return this.mode;
   }
 
   // 续聊：把磁盘读回来的历史灌进内存（覆盖当前历史）。
@@ -193,7 +212,7 @@ export class Agent {
         // 消费流式生成器：yield 是文本增量(实时显示 + 累积供封口)，
         // done 的 value 是组装好的完整 LLMResponse。
         const it = this.llm.stream(this.history, {
-          system: this.system,
+          system: this.effectiveSystem(),
           tools: this.tools,
           signal,
         });
@@ -426,15 +445,24 @@ export class Agent {
     return text || this.extractText(step.value.content);
   }
 
-  // 安全闸：判断一个工具调用是否被放行。
+  // 安全闸（第24步：权限模式）：判断一个工具调用是否被放行。
   // 返回 null = 放行；返回字符串 = 拒绝（该字符串作为 is_error 结果喂回模型）。
+  // 决策 = 当前模式 × 工具类别 → allow|ask|deny：
+  //   allow → 直接跑;deny → 不问直接拒(带原因);ask → 看「总是允许」再走 onApprove。
   private async checkPermission(call: ToolUseBlock): Promise<string | null> {
     const tool = this.tools.find((t) => t.name === call.name);
-    // 非危险工具、或本会话已选「总是允许」=> 直接放行。
-    if (!tool?.dangerous || this.alwaysAllowed.has(call.name)) return null;
-    // 危险工具但没配审批回调 => 默认拒绝（fail closed）。
+    const category = tool?.category ?? "read"; // 缺省按只读兜底
+    const policy = resolvePolicy(this.mode, category);
+
+    if (policy === "allow") return null;
+    if (policy === "deny") {
+      // 硬拒绝(如 plan 模式禁改/禁执行):无视「总是允许」,回一条带原因的 is_error。
+      return `[${this.mode} 模式禁止「${category}」类操作：${call.name}；如需执行，请让用户用 /mode 切换到允许的模式后重试]`;
+    }
+    // policy === "ask"：本会话已选「总是允许」=> 放行;否则走人工确认。
+    if (this.alwaysAllowed.has(call.name)) return null;
     if (!this.onApprove) {
-      return `[已拒绝：${call.name} 是危险工具，但未配置人工确认]`;
+      return `[已拒绝：${call.name} 需人工确认，但未配置审批回调]`;
     }
     const decision = await this.onApprove({ name: call.name, input: call.input });
     if (decision === "always") {
@@ -443,6 +471,14 @@ export class Agent {
     }
     if (decision === "once") return null;
     return `[用户拒绝执行 ${call.name}]`;
+  }
+
+  // 传给 LLM 的实际 system：基线 system 之上追加「当前模式」说明行（default 不追加，
+  // 见 permission.modeSystemLine —— 它是基线，模型本按默认行为跑，且保持提示词缓存热路径稳定）。
+  private effectiveSystem(): string | undefined {
+    const line = modeSystemLine(this.mode);
+    if (!line) return this.system;
+    return this.system ? `${this.system}\n\n${line}` : line;
   }
 
   // 执行单个工具调用。出错转成 is_error 结果块让模型纠正；

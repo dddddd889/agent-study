@@ -43,8 +43,8 @@ describe("glob:按名找文件(只返回路径)", () => {
     expect(out).toContain("无匹配");
   });
 
-  test("glob 非 dangerous(免审批)", () => {
-    expect(globTool.dangerous).toBeFalsy();
+  test("glob 归 read 类(只读,各模式放行)", () => {
+    expect(globTool.category).toBe("read");
   });
 });
 
@@ -75,7 +75,7 @@ describe("grep:按正则搜内容", () => {
     await expect(grepTool.run({ pattern: "(", path: dir })).rejects.toThrow("非法正则");
   });
 
-  test("grep dangerous(含内容,与 read_file 一致走审批)", () => {
-    expect(grepTool.dangerous).toBe(true);
+  test("grep 归 read 类(只读检索,与 read_file 同待遇,各模式放行)", () => {
+    expect(grepTool.category).toBe("read");
   });
 });

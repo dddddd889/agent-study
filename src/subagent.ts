@@ -7,6 +7,7 @@ import {
   ROLES,
   type Role,
 } from "./roles";
+import type { PermissionMode } from "./permission";
 import { appendSubagentMessages } from "./session";
 import type { LLM, Message, Tool, Usage } from "./types";
 
@@ -50,6 +51,8 @@ export interface SubagentDeps {
   maxSteps?: number;
   // 子 agent 跑完回传它的短 id + 总 token 用量(含缓存读写),供主层【按 id】分列(第22步)。
   onSubUsage?: (id: string, usage: Usage) => void;
+  // 取主 agent 当前权限模式:子 agent 派生时【继承】它(第24步)。不提供则子 agent 自读 AGENT_MODE。
+  getMode?: () => PermissionMode;
 }
 
 // 随机短 id(6 位十六进制):天然唯一、并发也不撞。用作存档名/显示前缀/配色锚点。
@@ -135,6 +138,7 @@ async function runSubagent(
     system: role.system,
     tools,
     maxSteps: deps.maxSteps ?? role.maxSteps ?? SUBAGENT_MAX_STEPS, // 预算隔离
+    mode: deps.getMode?.(), // 继承主 agent 当前权限模式(plan 下子 agent 也只读)
     onApprove, // 审批透传:主/子共享
     onTurnComplete: (added) => appendSubagentMessages(mainId, id, added), // 存档
     onToolCall: (c) => {
@@ -191,7 +195,7 @@ export function createDispatchAgentTool(deps: SubagentDeps): Tool {
       roleList +
       "\n⚠️ 子 agent【看不到】当前对话,必须把完成任务所需的【全部背景】写进 prompt。" +
       "子 agent 无法再派子 agent、也不能请 critic。",
-    dangerous: false,
+    category: "read", // 派活本身无副作用(子 agent 内部工具各自再过模式);免审批
     concurrent: true, // 可并行:一轮派多个子 agent 时并发执行(见 docs/16)
     inputSchema: {
       type: "object",
@@ -234,7 +238,7 @@ export function createCriticTool(deps: SubagentDeps): Tool {
       "重要 / 易错 / 有可验证产物的任务完成后用它自查;平凡确定的操作(如 ls、看时间、单次读取)【不必】用。\n" +
       "⚠️ 关键:审查者【看不到】当前对话,你必须【同时】提供 task(原始任务/目标)和 output(产出结果)——" +
       "只给 output 无法判对错(给「2」却不知问的是不是「1+1」)。有代码/文件产物时在 artifacts 里给出路径线索。",
-    dangerous: false,
+    category: "read", // 请审查本身无副作用(审查者只读查验);免审批
     concurrent: true, // 可并行:同时审多份产出
     inputSchema: {
       type: "object",

@@ -91,8 +91,8 @@ describe("todo_write 工具:无状态 + 渲染", () => {
     expect(out3).not.toContain("读配置");
   });
 
-  test("todo_write 是非危险工具(不走审批)", () => {
-    expect(todoWriteTool.dangerous).toBeFalsy();
+  test("todo_write 归 read 类(不走审批)", () => {
+    expect(todoWriteTool.category ?? "read").toBe("read");
   });
 
   test("renderTodos:空清单有占位文案", () => {

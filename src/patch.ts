@@ -137,7 +137,7 @@ export const applyPatchTool: Tool = {
     "+新文件每一行(前面一个加号)\n" +
     "*** Delete File: 相对路径\n" +
     "*** End Patch",
-  dangerous: true, // 改文件系统 → 需确认
+  category: "edit", // 改文件系统
   // 不标 concurrent:改文件、讲顺序,与 edit/write 一样串行。
   inputSchema: {
     type: "object",

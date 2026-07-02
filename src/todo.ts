@@ -74,7 +74,7 @@ export const todoWriteTool: Tool = {
   description:
     "维护任务清单。处理多步任务时用它拆解、跟踪进度。每次传【完整】清单(全量覆盖旧清单)。" +
     "status: pending(待办) / in_progress(进行中) / completed(已完成)。",
-  dangerous: false, // 纯记录,不碰文件/网络/进程,无需人工确认
+  category: "read", // 纯记录,不碰文件/网络/进程 → 只读类,各模式放行
   auxiliary: true, // 记账工具,不计入 maxSteps 干活步数预算(见 agent.ts 循环 / docs/14)
   inputSchema: {
     type: "object",

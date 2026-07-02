@@ -143,7 +143,7 @@ export const readFileTool: Tool = {
     "读取文本文件并返回带行号的内容（UTF-8）。大文件用 offset/limit 分页读。" +
     `默认从头读 ${READ_DEFAULT_LIMIT} 行,单行超 ${READ_MAX_LINE} 字符会省略。\n` +
     "⚠️ 输出每行前缀是「行号+Tab」,仅供定位;用 Edit 时 old_string 要用文件【真实内容】,不含该前缀。",
-  dangerous: true, // 能读到密钥/隐私文件，且可能被外发 → 需确认
+  category: "read", // 只读文件(可能含密钥)——default 放行,plan 允许
   inputSchema: {
     type: "object",
     properties: {
@@ -189,7 +189,7 @@ export const writeFileTool: Tool = {
   description:
     "把文本写入文件（覆盖已有内容，自动创建缺失的父目录）。用于新建文件或整文件重写;" +
     "只改其中一处请用 edit_file。",
-  dangerous: true, // 改文件系统 → 需确认
+  category: "edit", // 改文件系统
   inputSchema: {
     type: "object",
     properties: {
@@ -216,7 +216,7 @@ export const editFileTool: Tool = {
     "精确编辑文件:把 old_string 替换成 new_string。old_string 必须【唯一命中】(含缩进/空白," +
     "用文件真实内容、不含 read 的行号前缀);命中 0 次或多次会报错——请扩上下文,或用 replace_all 批量替。" +
     "new_string 留空即删除那段。⚠️ 必须先 read_file 读过该文件再编辑。改一处用它;新建/整体重写用 write_file。",
-  dangerous: true, // 改文件系统 → 需确认
+  category: "edit", // 改文件系统
   inputSchema: {
     type: "object",
     properties: {
@@ -280,7 +280,7 @@ export const httpRequestTool: Tool = {
   name: "http_request",
   description:
     "发起一个 HTTP(S) 请求，返回状态码和响应体。需要获取网络数据 / 调接口时使用。",
-  dangerous: true, // 有网络副作用（外发数据 / 打内网）→ 需确认
+  category: "exec", // 网络副作用(外发数据 / 打内网)
   inputSchema: {
     type: "object",
     properties: {
@@ -324,7 +324,7 @@ export const shellTool: Tool = {
   description:
     "执行一条 shell 命令，返回 stdout 和 stderr。用于跑测试、git 等操作。" +
     "⚠️ 找文件请用 glob、搜内容请用 grep、读文件用 read_file —— 不要用 shell 的 find/grep/ls/cat（更脆、要审批、噪音大）。",
-  dangerous: true, // 能执行任意命令，最危险 → 需确认
+  category: "exec", // 执行任意命令,最危险
   inputSchema: {
     type: "object",
     properties: {
@@ -359,7 +359,7 @@ export const defaultTools: Tool[] = [
   editFileTool, // 第19步:精确编辑(字符串替换 + read-before-edit)
   applyPatchTool, // 第21步:跨文件原子补丁(Codex 风格)
   globTool, // 第20步:按名找文件(只读,免审批)
-  grepTool, // 第20步:按内容搜(含内容→dangerous)
+  grepTool, // 第20步:按内容搜(只读,归 read 类)
   httpRequestTool,
   shellTool,
   todoWriteTool, // 第14步:任务规划(无状态 todo 清单,见 src/todo.ts)

@@ -32,10 +32,10 @@ describe("MCP stdio(真起 mock server 子进程)", () => {
     expect(servers[0]!.ok).toBe(true);
     expect(servers[0]!.transport).toBe("stdio");
 
-    // 适配:前缀 <server>__、标 dangerous
+    // 适配:前缀 <server>__、归 exec 类(外部工具最保守,default 问/plan 拒)
     const echo = tools.find((t) => t.name === "mock__echo");
     expect(echo).toBeDefined();
-    expect(echo!.dangerous).toBe(true);
+    expect(echo!.category).toBe("exec");
 
     // 转发 tools/call
     const out = await echo!.run({ text: "hi" });

@@ -6,8 +6,8 @@ import type { Tool } from "./types";
 
 // 第 20 步:结构化检索 grep / glob —— 纯 JS 手写、零依赖、跨运行时,取代脆弱的 shell 搜索。
 // 见 docs/20。为什么不 shell-out rg/find:我们做它就是为了摆脱 shell 搜索(命令易错、跨平台
-// 不一、要审批);再去 shell 反而没摆脱。为什么 grep 标 dangerous 而 glob 不:grep 返回文件
-// 【内容】(命中行可能含密钥),和 read_file 一致走审批,堵住「grep 绕过读审批」;glob 只给路径,安全。
+// 不一);再去 shell 反而没摆脱。grep/glob 都归 read 类(只读检索),第24步权限模式下:default
+// 放行、plan 允许、yolo 放行 —— 只读操作各模式均不打断(与 read_file 同待遇)。
 
 // ---- 上限(防大仓库把内存/上下文冲爆)----
 const GLOB_MAX_FILES = 200; // glob 命中文件数上限
@@ -134,7 +134,7 @@ export const globTool: Tool = {
     "按文件名模式查找文件,返回匹配的相对路径列表(不返回内容)。" +
     "支持 * (段内)、** (任意层)、? 。例:src/**/*.ts、**/*.test.ts。只读、快速。" +
     "默认跳过 .git/node_modules 及 .gitignore 命中的目录;要搜被忽略的目录(如 tmp/、.sessions/)传 no_ignore: true。",
-  dangerous: false, // 只返回路径,安全 → 免审批
+  category: "read", // 只返回路径,只读 → 各模式放行
   inputSchema: {
     type: "object",
     properties: {
@@ -190,7 +190,7 @@ export const grepTool: Tool = {
     "按正则在文件内容里搜索,返回「相对路径:行号:该行」。可用 glob 限定文件范围。" +
     "只读检索(比裸 shell grep 更稳:结构化输出、跨平台、跳 .git/node_modules 及 .gitignore)。" +
     "要搜被 .gitignore 忽略的目录(如 tmp/)传 no_ignore: true。",
-  dangerous: true, // 返回文件内容(可能含密钥),与 read_file 一致走审批,堵读绕过
+  category: "read", // 只读检索(与 read_file 同类);default 放行,plan 允许,不再单独审批
   inputSchema: {
     type: "object",
     properties: {

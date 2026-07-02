@@ -4,6 +4,7 @@ import { Agent } from "./agent";
 import { AnthropicLLM } from "./llm";
 import { extractMemory, readMemory, writeMemory } from "./memory";
 import { loadMcpTools, type McpServerInfo } from "./mcp";
+import { isPermissionMode, MODE_LABELS, MODE_ORDER } from "./permission";
 import {
   appendMessages,
   listSessions,
@@ -55,10 +56,6 @@ async function main() {
   // 会话 id：启动带参 = 续聊该会话；不带 = 新建。/new 会换成新 id。
   // onTurnComplete 闭包读取的是 sessionId 这个 let 变量的“当前值”，所以 /new 后能切到新文件。
   let sessionId = process.argv[2] ?? newSessionId();
-
-  // 放行模式：AGENT_ALLOW_ALL=1 时危险工具自动允许、不弹问。
-  // 仅供本地无人值守等场景，慎用 —— shell 会裸跑任意命令。
-  const allowAll = process.env.AGENT_ALLOW_ALL === "1";
 
   // 长期记忆：会话开始时把 .memory.md 注入系统提示（跨会话沉淀的事实/偏好/决定）。
   // 末段是第14步的【规划引导】:规划能力主要来自这段提示 + todo_write 工具(见 docs/14)。
@@ -183,28 +180,28 @@ async function main() {
     );
     return run;
   };
-  const onApprove = allowAll
-    ? async () => "always" as const
-    : ({ name, input }: { name: string; input: Record<string, unknown> }) =>
-        withApprovalLock(async () => {
-          if (sessionAllowed.has(name)) return "always" as const; // 已总是允许,不再打断
-          approvalPending = true; // 定住其它并行子 agent 的日志,别冲掉下面的提示行
-          try {
-            const ans = await ask(
-              `\n  ⚠ 允许执行 ${name}(${JSON.stringify(input)})? [y]一次 /[a]总是 /[n]拒绝 `,
-              currentAbort?.signal,
-            );
-            const c = (ans ?? "").trim().toLowerCase()[0];
-            if (c === "a") {
-              sessionAllowed.add(name);
-              return "always" as const;
-            }
-            return c === "y" ? ("once" as const) : ("deny" as const);
-          } finally {
-            approvalPending = false;
-            flushHeld(); // 审批结束,把期间缓冲的日志按序放出来
-          }
-        });
+  // onApprove 只在【权限模式判为 ask】时被 Agent 调到(allow/deny 档不经过它);yolo 模式全 allow
+  // → 根本不会走到这里。所以这里是纯粹的 y/a/n 交互界面 + 「本会话总是允许」记忆。
+  const onApprove = ({ name, input }: { name: string; input: Record<string, unknown> }) =>
+    withApprovalLock(async () => {
+      if (sessionAllowed.has(name)) return "always" as const; // 已总是允许,不再打断
+      approvalPending = true; // 定住其它并行子 agent 的日志,别冲掉下面的提示行
+      try {
+        const ans = await ask(
+          `\n  ⚠ 允许执行 ${name}(${JSON.stringify(input)})? [y]一次 /[a]总是 /[n]拒绝 `,
+          currentAbort?.signal,
+        );
+        const c = (ans ?? "").trim().toLowerCase()[0];
+        if (c === "a") {
+          sessionAllowed.add(name);
+          return "always" as const;
+        }
+        return c === "y" ? ("once" as const) : ("deny" as const);
+      } finally {
+        approvalPending = false;
+        flushHeld(); // 审批结束,把期间缓冲的日志按序放出来
+      }
+    });
 
   // 子 agent(第15步):dispatch_agent 就是又一个普通工具。getSessionId 闭包读当前 sessionId
   // (/new 后自动切目录);currentTools 返回当前全集(含 MCP 热重载),子 agent 在此基础上剔除
@@ -237,6 +234,8 @@ async function main() {
       emit(`  ${paintSub(id, `▓${id}`)} ${name} ${isError ? "出错" : "结果"}：${content}`),
     // 子 agent 跑完回传总用量 → 按短 id 记进主 Agent(第22步 /context 按 id 分列)。
     onSubUsage: (id: string, u: Usage) => agent.recordSubUsage(id, u),
+    // 子 agent 继承主 agent 当前权限模式(第24步:plan 下子 agent 也只读)。
+    getMode: () => agent.getMode(),
   };
   dispatchTool = createDispatchAgentTool(subDeps);
   criticTool = createCriticTool(subDeps);
@@ -323,14 +322,18 @@ async function main() {
     console.log(`新会话 ${sessionId}`);
   }
 
-  if (allowAll) {
+  // 权限模式(第24步):非默认模式启动时提示一下当前档位;yolo 额外加警告。
+  const startMode = agent.getMode();
+  if (startMode !== "default") {
     console.log(
-      "⚠ 放行模式(AGENT_ALLOW_ALL=1)：所有危险工具将自动执行、不再确认。",
+      startMode === "yolo"
+        ? "⚠ 权限模式 yolo：所有工具自动执行、不再确认。"
+        : `权限模式：${startMode}（${MODE_LABELS[startMode]}）`,
     );
   }
 
   console.log(
-    "命令：/exit · /reset · /sessions · /new · /context · /memory · /todo · /agents · /mcp [reload]",
+    "命令：/exit · /reset · /sessions · /new · /context · /memory · /todo · /agents · /mode · /mcp [reload]",
   );
 
   // 提示符已可立即出现;MCP 在后台连(连好再打印就绪概况、再可用)。
@@ -389,6 +392,24 @@ async function main() {
         console.log(line(`缓存·子 ${paintSub(id, `▓${id}`)}`, usage));
       }
       console.log("");
+      continue;
+    }
+    if (text === "/mode" || text.startsWith("/mode ")) {
+      // 权限模式(第24步):不带参 → 列出当前档 + 可选项;带参 → 切换。
+      const arg = text.slice(5).trim();
+      if (!arg) {
+        const cur = agent.getMode();
+        console.log(`当前权限模式：${cur}`);
+        for (const m of MODE_ORDER) {
+          console.log(`  ${m === cur ? "→" : " "} ${m}：${MODE_LABELS[m]}`);
+        }
+        console.log("\n切换：/mode <default|acceptEdits|plan|yolo>\n");
+      } else if (isPermissionMode(arg)) {
+        agent.setMode(arg);
+        console.log(`已切换权限模式 → ${arg}：${MODE_LABELS[arg]}\n`);
+      } else {
+        console.log(`未知模式「${arg}」。可选：${MODE_ORDER.join(" / ")}\n`);
+      }
       continue;
     }
     if (text === "/memory") {

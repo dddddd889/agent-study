@@ -1,6 +1,6 @@
 # agent-study · 第 1 步：最简对话循环
 
-> 📈 **本仓库按步骤演进。** 当前代码已实现到 **第 23 步：路径沙箱（文件工具限制在工作目录）**。步骤文档：
+> 📈 **本仓库按步骤演进。** 当前代码已实现到 **第 24 步：权限模式（会话级审批策略）**。步骤文档：
 >
 > - 第 2 步 · 工具调用循环 → [docs/02-tool-calling-loop.md](docs/02-tool-calling-loop.md)
 > - 第 3 步 · 常用内置工具（文件 / HTTP / Shell）→ [docs/03-builtin-tools.md](docs/03-builtin-tools.md)
@@ -24,6 +24,7 @@
 > - 第 21 步 · apply_patch（Codex 风格跨文件原子补丁 / 内容定位 / 增删文件）→ [docs/21-apply-patch.md](docs/21-apply-patch.md)
 > - 第 22 步 · 提示词缓存（cache_control 断点 / 前缀命中 / /context 观测命中率）→ [docs/22-prompt-caching.md](docs/22-prompt-caching.md)
 > - 第 23 步 · 路径沙箱（文件工具限制在 cwd / 词法硬边界 / AGENT_SANDBOX[_ROOT]）→ [docs/23-path-sandbox.md](docs/23-path-sandbox.md)
+> - 第 24 步 · 权限模式（类别×模式→策略 / default·acceptEdits·plan·yolo / /mode / AGENT_MODE）→ [docs/24-permission-modes.md](docs/24-permission-modes.md)
 >
 > 本文件介绍的是**第 1 步内核**（最简对话循环）——它仍是理解后续步骤的基础。
 
@@ -129,11 +130,11 @@ AI > 你好小明！很高兴认识你。
 AI > 你叫小明。      ← 证明它记住了上下文
 ```
 
-命令：`/exit` 退出 · `/reset` 清空对话历史 · `/sessions` 列出会话 · `/new` 开新会话 · `/context` 看上下文用量 · `/memory` 看长期记忆 · `/todo` 看当前任务清单 · `/agents` 看本会话派出的子 agent · `/mcp [reload]` 看/重载 MCP。
+命令：`/exit` 退出 · `/reset` 清空对话历史 · `/sessions` 列出会话 · `/new` 开新会话 · `/context` 看上下文用量 · `/memory` 看长期记忆 · `/todo` 看当前任务清单 · `/agents` 看本会话派出的子 agent · `/mode [名]` 看/切权限模式 · `/mcp [reload]` 看/重载 MCP。
 
 续聊历史会话：`bun run src/cli.ts <sessionId>`（会话存在 `.sessions/`，惰性创建，跑完一轮才出现）。
 
-危险工具（shell/读写文件/HTTP）默认执行前会**人工确认**；无人值守想全放行用 `AGENT_ALLOW_ALL=1 bun run start`（⚠ 慎用，详见 [docs/10](docs/10-security-approval.md)）。
+工具按**权限模式**受控（第 24 步）：`default` 下改文件/执行命令前**人工确认**、只读放行。运行时 `/mode` 切换 `default`/`acceptEdits`（自动改）/`plan`（只读）/`yolo`（全放行）；启动用 `AGENT_MODE=yolo bun run start` 全放行（⚠ 慎用，取代旧的 `AGENT_ALLOW_ALL`，详见 [docs/24](docs/24-permission-modes.md)）。
 
 ## 调试：先跑测试
 
@@ -188,7 +189,7 @@ console.log("RESPONSE", data);
 
 ## 演进进度 & 下一步
 
-从第 1 步内核出发，已经一步步长到了第 23 步。**已完成**（每步一篇 docs，见顶部导航）：
+从第 1 步内核出发，已经一步步长到了第 24 步。**已完成**（每步一篇 docs，见顶部导航）：
 
 - ✅ 第 2 步 · 工具调用循环（从"聊天机器人"变"agent"的关键一步）
 - ✅ 第 3 步 · 内置工具（文件 / HTTP / Shell）
@@ -208,14 +209,15 @@ console.log("RESPONSE", data);
 - ✅ 第 17 步 · 反思与验证闭环（critic 审查者：grounded 隔离审查 + 结构化裁定 + 只为[严重]返工的循环，与 dispatch_agent 共用 runSubagent）
 - ✅ 第 18 步 · 子 agent 角色注册表（src/roles.ts：general/explore/plan/critic，dispatch_agent 加 agent_type，配置集中·暴露分两种·禁嵌套基线）
 - ✅ 第 19 步 · 精确编辑 + 分页 read（edit_file 字符串替换：唯一命中/replace_all/删除 + read-before-edit + read 行号分页）
-- ✅ 第 20 步 · 结构化检索（glob 按名找文件[只读免审批] + grep 按内容搜[含内容→dangerous]，纯 JS 手写 + 简化 .gitignore + 上限护栏）
+- ✅ 第 20 步 · 结构化检索（glob 按名找文件 + grep 按内容搜，均归 read 类，纯 JS 手写 + 简化 .gitignore + 上限护栏）
 - ✅ 第 21 步 · apply_patch（Codex 风格跨文件原子补丁：内容定位[非行号]/多 hunk 免疫行漂移/增删文件/全或无）
 - ✅ 第 22 步 · 提示词缓存（buildBody 挂 2 个 cache_control 断点[system末+末条消息] + AGENT_CACHE/AGENT_CACHE_TTL + 抓 usage + /context 主对话 + 每个子 agent 按 id 分列命中率）
 - ✅ 第 23 步 · 路径沙箱（resolveInSandbox 词法归一硬边界，read/write/edit/patch/grep/glob 限制在 cwd + AGENT_SANDBOX[_ROOT]；shell 除外、软链留 TODO）
+- ✅ 第 24 步 · 权限模式（类别[read/edit/exec]×模式[default/acceptEdits/plan/yolo]→策略[allow/ask/deny] + /mode 运行时切 + AGENT_MODE + 子 agent 继承 + plan 注入 system；删 dangerous/AGENT_ALLOW_ALL）
 
 **下一步（规划中）**：
 
-- 🚧 **权限模式 / 执行沙箱**：会话级审批策略（自动批准编辑 / 只读 / plan，对标 Codex sandbox / CC permission modes）+ 收紧 shell（OS 级沙箱/命令白名单）——沙箱的「越界需批准」「shell 绕过口」留给它。
+- 🚧 **执行沙箱**：收紧 shell（OS 级沙箱 / 命令白名单），补上权限模式里 `yolo`/`allow` 档下 shell 的 OS 层越界（第 24 步只做了审批策略层）。
 
 _基建打磨：_
 
@@ -223,11 +225,9 @@ _基建打磨：_
 
 _更贴近 Codex CLI / Claude Code CLI —— 编码 agent 的手脚 + 安全模型 + 项目集成：_
 
-- 🚧 **路径沙箱**：`read`/`write`/`edit`/`patch`/`grep` 限制在工作目录内，堵路径穿越（`../../etc/passwd`）。
-- 🚧 **权限模式 / 执行沙箱**：会话级模式（如「自动批准编辑、shell 仍问」，对标 Codex sandbox 模式 / CC permission modes）+ 可选命令执行沙箱。路径沙箱是其一部分。
 - 🚧 **指令注入**：启动读 `AGENTS.md`（Codex）/ `CLAUDE.md`（Claude Code）注入 system —— 已有 `.memory.md`，几乎白送。
 - 🚧 **自定义 slash 命令**：`.claude/commands/*.md`（对标 CC）/ prompts（对标 Codex），放个 md 就多一个命令。
-- 🚧 **plan mode**：只读探路 → 出计划 → 批准后再动手（对标 CC）。已有 todo + explore 角色，差一个「只读闸门 + 批准解锁写」。
+- ✅ **plan mode**（第 24 步随权限模式落地）：`/mode plan` 只读探路出计划 → `/mode acceptEdits` 解锁再动手（对标 CC）。
 
 _多 agent 深化：_
 
@@ -236,6 +236,6 @@ _多 agent 深化：_
 
 _基建打磨：_
 
-- 🚧 多行输入（grill 到一半）、消息级压缩、prompt caching、成本/token 实时显示。
+- 🚧 多行输入（grill 到一半）、消息级压缩、成本/token 实时显示。
 
 每一步都建议先补测试，再写实现——`FakeLLM` 的模式可以一直复用。
