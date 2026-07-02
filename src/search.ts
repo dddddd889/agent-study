@@ -1,6 +1,7 @@
 import { existsSync, readFileSync } from "node:fs";
 import { readdir, readFile, stat } from "node:fs/promises";
-import { join, relative, resolve } from "node:path";
+import { join, relative } from "node:path";
+import { resolveInSandbox } from "./sandbox";
 import type { Tool } from "./types";
 
 // 第 20 步:结构化检索 grep / glob —— 纯 JS 手写、零依赖、跨运行时,取代脆弱的 shell 搜索。
@@ -149,7 +150,7 @@ export const globTool: Tool = {
   async run(input, ctx) {
     const pattern = String(input.pattern ?? "");
     if (!pattern) throw new Error("glob 需要 pattern");
-    const root = resolve(String(input.path ?? "."));
+    const root = resolveInSandbox(String(input.path ?? ".")); // 沙箱校验遍历根(第23步)
     const noIgnore = input.no_ignore === true;
     const re = globToRegExp(pattern);
     const hits: string[] = [];
@@ -213,7 +214,7 @@ export const grepTool: Tool = {
     } catch (e) {
       throw new Error(`非法正则: ${(e as Error).message}`);
     }
-    const target = resolve(String(input.path ?? "."));
+    const target = resolveInSandbox(String(input.path ?? ".")); // 沙箱校验遍历根(第23步)
     const noIgnore = input.no_ignore === true;
     const fileFilter = input.glob ? globToRegExp(String(input.glob)) : null;
     const hits: string[] = [];

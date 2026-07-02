@@ -1,6 +1,6 @@
 # agent-study · 第 1 步：最简对话循环
 
-> 📈 **本仓库按步骤演进。** 当前代码已实现到 **第 22 步：提示词缓存（prompt caching）**。步骤文档：
+> 📈 **本仓库按步骤演进。** 当前代码已实现到 **第 23 步：路径沙箱（文件工具限制在工作目录）**。步骤文档：
 >
 > - 第 2 步 · 工具调用循环 → [docs/02-tool-calling-loop.md](docs/02-tool-calling-loop.md)
 > - 第 3 步 · 常用内置工具（文件 / HTTP / Shell）→ [docs/03-builtin-tools.md](docs/03-builtin-tools.md)
@@ -23,6 +23,7 @@
 > - 第 20 步 · 结构化检索（glob 找文件 / grep 搜内容 / 简化 .gitignore）→ [docs/20-grep-glob.md](docs/20-grep-glob.md)
 > - 第 21 步 · apply_patch（Codex 风格跨文件原子补丁 / 内容定位 / 增删文件）→ [docs/21-apply-patch.md](docs/21-apply-patch.md)
 > - 第 22 步 · 提示词缓存（cache_control 断点 / 前缀命中 / /context 观测命中率）→ [docs/22-prompt-caching.md](docs/22-prompt-caching.md)
+> - 第 23 步 · 路径沙箱（文件工具限制在 cwd / 词法硬边界 / AGENT_SANDBOX[_ROOT]）→ [docs/23-path-sandbox.md](docs/23-path-sandbox.md)
 >
 > 本文件介绍的是**第 1 步内核**（最简对话循环）——它仍是理解后续步骤的基础。
 
@@ -187,7 +188,7 @@ console.log("RESPONSE", data);
 
 ## 演进进度 & 下一步
 
-从第 1 步内核出发，已经一步步长到了第 22 步。**已完成**（每步一篇 docs，见顶部导航）：
+从第 1 步内核出发，已经一步步长到了第 23 步。**已完成**（每步一篇 docs，见顶部导航）：
 
 - ✅ 第 2 步 · 工具调用循环（从"聊天机器人"变"agent"的关键一步）
 - ✅ 第 3 步 · 内置工具（文件 / HTTP / Shell）
@@ -210,8 +211,11 @@ console.log("RESPONSE", data);
 - ✅ 第 20 步 · 结构化检索（glob 按名找文件[只读免审批] + grep 按内容搜[含内容→dangerous]，纯 JS 手写 + 简化 .gitignore + 上限护栏）
 - ✅ 第 21 步 · apply_patch（Codex 风格跨文件原子补丁：内容定位[非行号]/多 hunk 免疫行漂移/增删文件/全或无）
 - ✅ 第 22 步 · 提示词缓存（buildBody 挂 2 个 cache_control 断点[system末+末条消息] + AGENT_CACHE/AGENT_CACHE_TTL + 抓 usage + /context 主对话 + 每个子 agent 按 id 分列命中率）
+- ✅ 第 23 步 · 路径沙箱（resolveInSandbox 词法归一硬边界，read/write/edit/patch/grep/glob 限制在 cwd + AGENT_SANDBOX[_ROOT]；shell 除外、软链留 TODO）
 
 **下一步（规划中）**：
+
+- 🚧 **权限模式 / 执行沙箱**：会话级审批策略（自动批准编辑 / 只读 / plan，对标 Codex sandbox / CC permission modes）+ 收紧 shell（OS 级沙箱/命令白名单）——沙箱的「越界需批准」「shell 绕过口」留给它。
 
 _基建打磨：_
 

@@ -1,6 +1,7 @@
 import { readFile, unlink, writeFile, mkdir } from "node:fs/promises";
 import { existsSync } from "node:fs";
-import { dirname, resolve } from "node:path";
+import { dirname } from "node:path";
+import { resolveInSandbox } from "./sandbox";
 import type { Tool } from "./types";
 
 // 第 21 步:apply_patch —— 一次性、跨多文件、含增删文件的【原子】编辑(Codex 风格补丁)。
@@ -154,7 +155,7 @@ export const applyPatchTool: Tool = {
     const summary: string[] = [];
 
     for (const op of ops) {
-      const abs = resolve(op.path);
+      const abs = resolveInSandbox(op.path); // 沙箱校验(第23步),越界抛错 → 整补丁不写
       if (op.type === "add") {
         if (existsSync(abs)) throw new Error(`Add File 目标已存在:${op.path}(不覆盖;改用 Update)`);
         writes.push({ path: abs, content: op.content });

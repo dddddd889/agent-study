@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { editFileTool, readFileTool, writeFileTool } from "../src/tools";
 
+process.env.AGENT_SANDBOX = "0"; // 本文件测工具行为,临时目录在 cwd 外 → 关沙箱(沙箱另见 sandbox.test.ts)
 const dir = mkdtempSync(join(tmpdir(), "edit-test-"));
 afterAll(() => rmSync(dir, { recursive: true, force: true }));
 

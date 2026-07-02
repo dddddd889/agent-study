@@ -1,8 +1,9 @@
 import { exec } from "node:child_process";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
-import { dirname, resolve } from "node:path";
+import { dirname } from "node:path";
 import { promisify } from "node:util";
 import { applyPatchTool } from "./patch";
+import { resolveInSandbox } from "./sandbox";
 import { globTool, grepTool } from "./search";
 import { todoWriteTool } from "./todo";
 import type { Tool } from "./types";
@@ -152,12 +153,11 @@ export const readFileTool: Tool = {
     },
     required: ["path"],
   },
-  // TODO: 路径沙箱 —— 限制在工作目录内，防止路径穿越 / 越权读取（如 ../../etc/passwd）。
   async run(input, ctx) {
-    const path = String(input.path ?? "");
-    const raw = await readFile(path, { encoding: "utf-8", signal: ctx?.signal });
+    const abs = resolveInSandbox(String(input.path ?? "")); // 沙箱校验(第23步),越界抛错
+    const raw = await readFile(abs, { encoding: "utf-8", signal: ctx?.signal });
     // 读成功即记入本 agent 的「已读集合」,满足 Edit 的 read-before-edit。
-    ctx?.readFiles?.add(resolve(path));
+    ctx?.readFiles?.add(abs);
 
     const lines = raw.split("\n");
     const total = lines.length;
@@ -198,15 +198,14 @@ export const writeFileTool: Tool = {
     },
     required: ["path", "content"],
   },
-  // TODO: 路径沙箱 —— 限制在工作目录内，防止路径穿越 / 越权写入。
   async run(input, ctx) {
-    const path = String(input.path ?? "");
+    const abs = resolveInSandbox(String(input.path ?? "")); // 沙箱校验(第23步)
     const content = String(input.content ?? "");
-    await mkdir(dirname(path), { recursive: true });
-    await writeFile(path, content, { encoding: "utf-8", signal: ctx?.signal });
+    await mkdir(dirname(abs), { recursive: true });
+    await writeFile(abs, content, { encoding: "utf-8", signal: ctx?.signal });
     // 写了即知内容,记入已读集合,之后可直接 Edit。
-    ctx?.readFiles?.add(resolve(path));
-    return `已写入 ${content.length} 个字符到 ${path}`;
+    ctx?.readFiles?.add(abs);
+    return `已写入 ${content.length} 个字符到 ${abs}`;
   },
 };
 
@@ -229,22 +228,22 @@ export const editFileTool: Tool = {
     required: ["path", "old_string", "new_string"],
   },
   async run(input, ctx) {
-    const path = String(input.path ?? "");
+    const abs = resolveInSandbox(String(input.path ?? "")); // 沙箱校验(第23步)
     const oldStr = String(input.old_string ?? "");
     const newStr = String(input.new_string ?? "");
     const replaceAll = input.replace_all === true;
 
     // read-before-edit:没读过该文件不许改(防盲改/陈旧)。ctx.readFiles 为空则跳过(库外直接调用)。
-    if (ctx?.readFiles && !ctx.readFiles.has(resolve(path))) {
-      throw new Error(`必须先 read_file 读过 ${path} 再 edit_file（防止盲改/改到陈旧内容）`);
+    if (ctx?.readFiles && !ctx.readFiles.has(abs)) {
+      throw new Error(`必须先 read_file 读过 ${abs} 再 edit_file（防止盲改/改到陈旧内容）`);
     }
     if (oldStr === "") throw new Error("old_string 不能为空");
 
-    const raw = await readFile(path, { encoding: "utf-8", signal: ctx?.signal });
+    const raw = await readFile(abs, { encoding: "utf-8", signal: ctx?.signal });
     // 统计命中次数(用 split 计数,避免正则转义)。
     const count = raw.split(oldStr).length - 1;
     if (count === 0) {
-      throw new Error(`未找到 old_string（在 ${path} 中 0 次命中）——请给更精确/更长的上下文`);
+      throw new Error(`未找到 old_string（在 ${abs} 中 0 次命中）——请给更精确/更长的上下文`);
     }
     if (count > 1 && !replaceAll) {
       throw new Error(
@@ -252,13 +251,13 @@ export const editFileTool: Tool = {
       );
     }
     const next = replaceAll ? raw.split(oldStr).join(newStr) : raw.replace(oldStr, newStr);
-    await writeFile(path, next, { encoding: "utf-8", signal: ctx?.signal });
+    await writeFile(abs, next, { encoding: "utf-8", signal: ctx?.signal });
 
     // 回显:替换处数 + 改动处前后小片段(取 new_string 落点周围几行),便于确认改对地方。
     const idx = next.indexOf(newStr);
     const around = idx >= 0 ? snippet(next, idx, newStr.length) : "";
     const n = replaceAll ? count : 1;
-    return `已在 ${path} 替换 ${n} 处${around ? `：\n${around}` : ""}`;
+    return `已在 ${abs} 替换 ${n} 处${around ? `：\n${around}` : ""}`;
   },
 };
 
