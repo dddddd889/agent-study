@@ -2,6 +2,7 @@ import { exec } from "node:child_process";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
 import { promisify } from "node:util";
+import { globTool, grepTool } from "./search";
 import { todoWriteTool } from "./todo";
 import type { Tool } from "./types";
 
@@ -320,7 +321,9 @@ export const httpRequestTool: Tool = {
 //          人工确认；本学习项目仅做最简实现并加 30s 超时防卡死。
 export const shellTool: Tool = {
   name: "shell",
-  description: "执行一条 shell 命令，返回 stdout 和 stderr。",
+  description:
+    "执行一条 shell 命令，返回 stdout 和 stderr。用于跑测试、git 等操作。" +
+    "⚠️ 找文件请用 glob、搜内容请用 grep、读文件用 read_file —— 不要用 shell 的 find/grep/ls/cat（更脆、要审批、噪音大）。",
   dangerous: true, // 能执行任意命令，最危险 → 需确认
   inputSchema: {
     type: "object",
@@ -354,6 +357,8 @@ export const defaultTools: Tool[] = [
   readFileTool,
   writeFileTool,
   editFileTool, // 第19步:精确编辑(字符串替换 + read-before-edit)
+  globTool, // 第20步:按名找文件(只读,免审批)
+  grepTool, // 第20步:按内容搜(含内容→dangerous)
   httpRequestTool,
   shellTool,
   todoWriteTool, // 第14步:任务规划(无状态 todo 清单,见 src/todo.ts)

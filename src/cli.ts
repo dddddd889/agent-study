@@ -64,6 +64,9 @@ async function main() {
   // 末段是第14步的【规划引导】:规划能力主要来自这段提示 + todo_write 工具(见 docs/14)。
   const baseSystem =
     "你是一个简洁、友好的中文助手。可以使用工具来获取实时信息、读写文件、发起 HTTP 请求或执行 shell 命令。\n\n" +
+    "检索优先用专用工具、别用 shell:找文件用 glob(如 src/**/*.ts)、搜内容用 grep(正则),它们更稳、输出规整、自动跳过 node_modules/.gitignore。" +
+    "改文件优先用 edit_file(精确替换),整文件重写才用 write_file。" +
+    "shell 只留给检索/读写之外的事(跑测试、git 等),不要用 shell 的 find/grep/ls/cat 来找文件或读文件。\n\n" +
     "处理需要多步骤的任务时,先用 todo_write 把目标拆成清单再动手;" +
     "每开始一项就把它标为 in_progress、做完立刻标 completed,同一时刻最多一项 in_progress;" +
     "计划有变就重发完整清单。简单的一两步任务不必用。\n\n" +

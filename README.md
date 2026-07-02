@@ -1,6 +1,6 @@
 # agent-study · 第 1 步：最简对话循环
 
-> 📈 **本仓库按步骤演进。** 当前代码已实现到 **第 19 步：精确编辑 + 分页 read**。步骤文档：
+> 📈 **本仓库按步骤演进。** 当前代码已实现到 **第 20 步：结构化检索（grep / glob）**。步骤文档：
 >
 > - 第 2 步 · 工具调用循环 → [docs/02-tool-calling-loop.md](docs/02-tool-calling-loop.md)
 > - 第 3 步 · 常用内置工具（文件 / HTTP / Shell）→ [docs/03-builtin-tools.md](docs/03-builtin-tools.md)
@@ -20,6 +20,7 @@
 > - 第 17 步 · 反思与验证闭环（critic 审查者 / 结构化裁定 / 返工循环）→ [docs/17-reflection-verify.md](docs/17-reflection-verify.md)
 > - 第 18 步 · 子 agent 角色注册表（agent_type / general·explore·plan·critic / 禁嵌套基线）→ [docs/18-subagent-roles.md](docs/18-subagent-roles.md)
 > - 第 19 步 · 精确编辑 + 分页 read（edit_file 字符串替换 / read-before-edit / 行号分页）→ [docs/19-edit-and-paged-read.md](docs/19-edit-and-paged-read.md)
+> - 第 20 步 · 结构化检索（glob 找文件 / grep 搜内容 / 简化 .gitignore）→ [docs/20-grep-glob.md](docs/20-grep-glob.md)
 >
 > 本文件介绍的是**第 1 步内核**（最简对话循环）——它仍是理解后续步骤的基础。
 
@@ -184,7 +185,7 @@ console.log("RESPONSE", data);
 
 ## 演进进度 & 下一步
 
-从第 1 步内核出发，已经一步步长到了第 19 步。**已完成**（每步一篇 docs，见顶部导航）：
+从第 1 步内核出发，已经一步步长到了第 20 步。**已完成**（每步一篇 docs，见顶部导航）：
 
 - ✅ 第 2 步 · 工具调用循环（从"聊天机器人"变"agent"的关键一步）
 - ✅ 第 3 步 · 内置工具（文件 / HTTP / Shell）
@@ -204,14 +205,14 @@ console.log("RESPONSE", data);
 - ✅ 第 17 步 · 反思与验证闭环（critic 审查者：grounded 隔离审查 + 结构化裁定 + 只为[严重]返工的循环，与 dispatch_agent 共用 runSubagent）
 - ✅ 第 18 步 · 子 agent 角色注册表（src/roles.ts：general/explore/plan/critic，dispatch_agent 加 agent_type，配置集中·暴露分两种·禁嵌套基线）
 - ✅ 第 19 步 · 精确编辑 + 分页 read（edit_file 字符串替换：唯一命中/replace_all/删除 + read-before-edit + read 行号分页）
+- ✅ 第 20 步 · 结构化检索（glob 按名找文件[只读免审批] + grep 按内容搜[含内容→dangerous]，纯 JS 手写 + 简化 .gitignore + 上限护栏）
 
 **下一步（规划中）**：
 
 _更贴近 Codex CLI / Claude Code CLI —— 编码 agent 的手脚 + 安全模型 + 项目集成：_
 
 - 🚧 **apply_patch**：Codex 风格 diff 补丁（一次多 hunk / 多文件 / 增删文件），是第 19 步 `edit_file` 的增强。
-- 🚧 **结构化检索**：`grep`（ripgrep）/ `glob` 专用工具，结构化输出，替代裸 `shell` grep。
-- 🚧 **路径沙箱**：`read`/`write`/`patch` 限制在工作目录内，堵路径穿越（`../../etc/passwd`）。
+- 🚧 **路径沙箱**：`read`/`write`/`edit`/`grep` 限制在工作目录内，堵路径穿越（`../../etc/passwd`）。
 - 🚧 **权限模式 / 执行沙箱**：会话级模式（如「自动批准编辑、shell 仍问」，对标 Codex sandbox 模式 / CC permission modes）+ 可选命令执行沙箱。路径沙箱是其一部分。
 - 🚧 **指令注入**：启动读 `AGENTS.md`（Codex）/ `CLAUDE.md`（Claude Code）注入 system —— 已有 `.memory.md`，几乎白送。
 - 🚧 **自定义 slash 命令**：`.claude/commands/*.md`（对标 CC）/ prompts（对标 Codex），放个 md 就多一个命令。
