@@ -1,6 +1,6 @@
 # agent-study · 第 1 步：最简对话循环
 
-> 📈 **本仓库按步骤演进。** 当前代码已实现到 **第 25 步：执行沙箱（shell 关进 OS 级沙箱）**。步骤文档：
+> 📈 **本仓库按步骤演进。** 当前代码已实现到 **第 26 步：http_request 的 SSRF 防护**。步骤文档：
 >
 > - 第 2 步 · 工具调用循环 → [docs/02-tool-calling-loop.md](docs/02-tool-calling-loop.md)
 > - 第 3 步 · 常用内置工具（文件 / HTTP / Shell）→ [docs/03-builtin-tools.md](docs/03-builtin-tools.md)
@@ -26,6 +26,7 @@
 > - 第 23 步 · 路径沙箱（文件工具限制在 cwd / 词法硬边界 / AGENT_SANDBOX[_ROOT]）→ [docs/23-path-sandbox.md](docs/23-path-sandbox.md)
 > - 第 24 步 · 权限模式（类别×模式→策略 / default·acceptEdits·plan·yolo / /mode / AGENT_MODE）→ [docs/24-permission-modes.md](docs/24-permission-modes.md)
 > - 第 25 步 · 执行沙箱（shell 进 OS 级沙箱 / Seatbelt·bwrap / 写限cwd·禁网 / fail-closed / 与权限模式正交）→ [docs/25-execution-sandbox.md](docs/25-execution-sandbox.md)
+> - 第 26 步 · http_request 的 SSRF 防护（校验解析后 IP / 私有段黑名单 / 重定向逐跳复校 / 可选白名单 / 超时）→ [docs/26-ssrf-protection.md](docs/26-ssrf-protection.md)
 >
 > 本文件介绍的是**第 1 步内核**（最简对话循环）——它仍是理解后续步骤的基础。
 
@@ -139,6 +140,8 @@ AI > 你叫小明。      ← 证明它记住了上下文
 
 `shell` 命令还被关进 **OS 级执行沙箱**（第 25 步，默认开）：写限工作目录、禁网（macOS Seatbelt / Linux bwrap）——**与权限模式正交，`yolo` 下 shell 仍被框住**。装依赖等需联网设 `AGENT_SANDBOX_EXEC_NET=1`，彻底裸跑设 `AGENT_SANDBOX_EXEC=0`（详见 [docs/25](docs/25-execution-sandbox.md)）。
 
+`http_request`（agent 自己的联网出口，不在 shell 沙箱内）有独立的 **SSRF 防护**（第 26 步，默认开）：发请求前解析目标 IP、拦私有/保留段（内网、云元数据）、重定向逐跳复校、超时。本地连 `localhost` 自测设 `AGENT_HTTP_SSRF=0`，防公网外泄可设 `AGENT_HTTP_ALLOWLIST`（详见 [docs/26](docs/26-ssrf-protection.md)）。
+
 ## 调试：先跑测试
 
 测试**完全离线**，不需要 API key，是 debug 的最佳起点：
@@ -192,7 +195,7 @@ console.log("RESPONSE", data);
 
 ## 演进进度 & 下一步
 
-从第 1 步内核出发，已经一步步长到了第 25 步。**已完成**（每步一篇 docs，见顶部导航）：
+从第 1 步内核出发，已经一步步长到了第 26 步。**已完成**（每步一篇 docs，见顶部导航）：
 
 - ✅ 第 2 步 · 工具调用循环（从"聊天机器人"变"agent"的关键一步）
 - ✅ 第 3 步 · 内置工具（文件 / HTTP / Shell）
@@ -218,11 +221,12 @@ console.log("RESPONSE", data);
 - ✅ 第 23 步 · 路径沙箱（resolveInSandbox 词法归一硬边界，read/write/edit/patch/grep/glob 限制在 cwd + AGENT_SANDBOX[_ROOT]；shell 除外、软链留 TODO）
 - ✅ 第 24 步 · 权限模式（类别[read/edit/exec]×模式[default/acceptEdits/plan/yolo]→策略[allow/ask/deny] + /mode 运行时切 + AGENT_MODE + 子 agent 继承 + plan 注入 system；删 dangerous/AGENT_ALLOW_ALL）
 - ✅ 第 25 步 · 执行沙箱（shell 包进 OS 级沙箱：macOS Seatbelt / Linux bwrap，workspace-write[写限cwd·读放开·禁网] + fail-closed + 与权限模式正交[yolo 也框住]；argv spawn 避转义 + realpath 归根）
+- ✅ 第 26 步 · http_request 的 SSRF 防护（校验解析后 IP 的私有/保留段黑名单[IPv4+IPv6+mapped] + 重定向逐跳复校 + 可选白名单防外泄 + 超时/中断合并；DNS 重绑定作已知局限）
 
 **下一步（规划中）**：
 
-- 🚧 **http_request 的 SSRF 防护**：禁 `169.254.169.254`/内网 IP、限协议、超时——补上「shell 之外」agent 自己发请求的外连口子。
 - 🚧 **可配置沙箱策略**：把 workspace-write / read-only / full-access 做成档位（对标 Codex sandbox 模式），与权限模式联动。
+- 🚧 **DNS 重绑定 A 级防护**：把连接钉在已校验 IP 上（需换底层能控 DNS lookup 的 HTTP 客户端）。
 
 _基建打磨：_
 

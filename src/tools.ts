@@ -5,6 +5,7 @@ import { promisify } from "node:util";
 import { execSandboxConfig, execSandboxEnv, wrapCommand } from "./exec-sandbox";
 import { applyPatchTool } from "./patch";
 import { resolveInSandbox } from "./sandbox";
+import { assertUrlAllowed, ssrfConfig } from "./ssrf";
 import { globTool, grepTool } from "./search";
 import { todoWriteTool } from "./todo";
 import type { Tool } from "./types";
@@ -277,6 +278,9 @@ function snippet(text: string, idx: number, len: number): string {
 }
 
 // 工具 5：发起 HTTP 请求。
+// 第26步:SSRF 防护 —— 发前校验解析后的 IP(拦私有/保留段)、重定向逐跳复校、合并超时+中断。
+// http_request 是 agent 自己的 fetch(不在 shell 执行沙箱内),需独立防护。见 src/ssrf.ts、docs/26。
+const HTTP_MAX_REDIRECTS = 5;
 export const httpRequestTool: Tool = {
   name: "http_request",
   description:
@@ -292,28 +296,42 @@ export const httpRequestTool: Tool = {
     },
     required: ["url"],
   },
-  // TODO: 超时（AbortSignal.timeout）、重定向策略、SSRF 防护（如禁止访问内网地址）。
   async run(input, ctx) {
-    const url = String(input.url ?? "");
-    // 仅允许 http(s)，挡掉 file:// 等本地协议。
-    if (!/^https?:\/\//i.test(url)) {
-      throw new Error(`只允许 http/https URL: ${url}`);
+    const cfg = ssrfConfig();
+    let url = String(input.url ?? "");
+    const method = input.method ? String(input.method) : "GET";
+    const headers = input.headers as Record<string, string> | undefined;
+    const body = input.body != null ? String(input.body) : undefined;
+
+    // 合并超时 + 用户中断(Ctrl+C):任一触发即断开。
+    const timeoutMs = Number(process.env.AGENT_HTTP_TIMEOUT) || 30_000;
+    const signals: AbortSignal[] = [AbortSignal.timeout(timeoutMs)];
+    if (ctx?.signal) signals.push(ctx.signal);
+    const signal = AbortSignal.any(signals);
+
+    // 手动跟随重定向:每一跳(含首个 URL)都过一遍 SSRF 校验,堵「302 绕进内网」。
+    let res: Response;
+    for (let hop = 0; ; hop++) {
+      await assertUrlAllowed(url, cfg); // 协议 + SSRF + 可选白名单;不放行即抛
+      res = await fetch(url, { method, headers, body, redirect: "manual", signal });
+      const loc = res.headers.get("location");
+      if (res.status >= 300 && res.status < 400 && loc) {
+        if (hop >= HTTP_MAX_REDIRECTS) {
+          throw new Error(`重定向次数超过上限（${HTTP_MAX_REDIRECTS}）`);
+        }
+        url = new URL(loc, url).toString(); // 相对跳转 → 绝对,下一轮复校
+        continue;
+      }
+      break;
     }
-    // 传入 signal：用户 Ctrl+C 时立即断开请求。
-    const res = await fetch(url, {
-      method: input.method ? String(input.method) : "GET",
-      headers: input.headers as Record<string, string> | undefined,
-      body: input.body != null ? String(input.body) : undefined,
-      signal: ctx?.signal,
-    });
     const raw = await res.text();
 
     // 是 HTML 就转成 Markdown 再返回（更干净、更省 token）；其它类型原样返回。
     // 先转后截：10k 额度装的是“干货 markdown”而非“半截 HTML”。
     const isHtml = (res.headers.get("content-type") ?? "").includes("text/html");
-    const body = isHtml ? htmlToMarkdown(raw) : raw;
+    const md = isHtml ? htmlToMarkdown(raw) : raw;
     const label = isHtml ? " (已转为 Markdown)" : "";
-    return `HTTP ${res.status}${label}\n\n${truncate(body)}`;
+    return `HTTP ${res.status}${label}\n\n${truncate(md)}`;
   },
 };
 

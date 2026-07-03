@@ -130,8 +130,20 @@ _Avoid_：路径沙箱、命令白名单（那是被否掉的脆弱替代）
 _Avoid_：只读沙箱、全隔离
 
 **SSRF（服务端请求伪造）**：
-诱导跑在特权网络位置的 agent 替攻击者发请求，够到公网够不到的东西（`localhost`、内网网段、云元数据 `169.254.169.254`）或外发本地数据。执行沙箱**禁网**是主要防线（连 socket 都出不去）；`http_request` 自身的 SSRF 防护是另一件事（TODO）。
+诱导跑在特权网络位置的 agent 替攻击者发请求，够到公网够不到的东西（`localhost`、内网网段、云元数据 `169.254.169.254`）或外发本地数据。agent 有**两条联网出口**、各自防：**shell** 靠执行沙箱**禁网**（连 socket 都出不去）；**`http_request`** 靠本机的**私有 IP 黑名单**（第 26 步，`http_request` 不在 shell 沙箱内、是 agent 自己的 fetch，需独立防护）。
 _Avoid_：注入（泛指）、越权
+
+**私有 IP 黑名单（private-IP blocklist）**：
+`http_request` 的 SSRF 防线：发请求前先 DNS 解析目标 host，把**解析出的所有 IP** 逐个对私有/保留段（loopback/私网/link-local/云元数据/IPv6 ULA + IPv4-mapped 等）做 CIDR 校验，命中即拒。校验**解析后的 IP**（而非主机名字符串）→ 天然免疫十进制/十六进制混淆 IP、以及域名指向内网。
+_Avoid_：IP 白名单（那是另一个）、防火墙
+
+**DNS 重绑定（DNS rebinding）**：
+SSRF 绕过：攻击者控制域名 DNS，校验时解析到公网 IP、`fetch` 实连时解析到内网 IP（两次解析不同）。本仓库**「解析+校验一次再正常 fetch」**挡住静态指向内网/混淆 IP/`localhost`，但**不防主动重绑定**（要彻底堵需把连接钉在已校验 IP 上，会牺牲 HTTPS）——列为**已知局限**。
+_Avoid_：TOCTOU（泛指时）、DNS 投毒
+
+**HTTP 白名单（http allowlist）**：
+可选的**外泄**防线（非 SSRF）：`AGENT_HTTP_ALLOWLIST` 列出的 host 才放行、其余（含公网）拒。默认空=不启用，保持 agent 自由访问公网;锁死场景才开。日常公网外泄由**审批**兜（`http_request` 是 `exec` 类，default 下每次发请求都问）。
+_Avoid_：私有 IP 黑名单（那是防 SSRF）、沙箱
 
 **fail-closed（不保则拒）**：
 安全护栏的默认姿态：不能保证安全时**拒绝执行**而非放行。执行沙箱不可用（无 `sandbox-exec`/`bwrap`）→ 禁 shell 并提示，而不是静默裸跑。反义是 fail-open（出问题也照跑）。

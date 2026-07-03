@@ -12,6 +12,7 @@ import {
 
 process.env.AGENT_SANDBOX = "0"; // 本文件测工具行为,临时目录在 cwd 外 → 关沙箱(沙箱另见 sandbox.test.ts)
 process.env.AGENT_SANDBOX_EXEC = "0"; // shell 测的是命令语义,关执行沙箱裸跑(执行沙箱另见 exec-sandbox.test.ts)
+process.env.AGENT_HTTP_SSRF = "0"; // http 测的是传输行为,关 SSRF 校验免真 DNS(SSRF 另见 ssrf.test.ts)
 
 describe("文件工具", () => {
   const dir = mkdtempSync(join(tmpdir(), "agent-study-"));
@@ -75,7 +76,7 @@ describe("http_request 工具", () => {
     ).rejects.toThrow(/http\/https/);
   });
 
-  test("把 ctx.signal 传给 fetch；signal 已 abort 时抛错", async () => {
+  test("ctx.signal 的中断传导给 fetch（已 abort 时抛错）", async () => {
     let seenSignal: AbortSignal | undefined;
     globalThis.fetch = (async (_url: any, init: any) => {
       seenSignal = init?.signal;
@@ -88,7 +89,9 @@ describe("http_request 工具", () => {
     await expect(
       httpRequestTool.run({ url: "http://example.com" }, { signal: ac.signal }),
     ).rejects.toThrow();
-    expect(seenSignal).toBe(ac.signal); // 确实把 signal 传给了 fetch
+    // 第26步:传给 fetch 的是【合并后】的 signal(超时+用户中断),非 ac.signal 本身;
+    // 断言中断确实传导过去(合并 signal 已 abort)。
+    expect(seenSignal?.aborted).toBe(true);
   });
 });
 
