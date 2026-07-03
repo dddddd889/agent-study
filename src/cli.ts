@@ -11,7 +11,10 @@ import {
   listSubagents,
   loadSession,
   newSessionId,
+  readSummary,
+  writeSummary,
 } from "./session";
+import { isUserInput } from "./context";
 import {
   createCriticTool,
   createDispatchAgentTool,
@@ -264,10 +267,22 @@ async function main() {
     },
     onToolResult: ({ name, content, isError }) =>
       emit(`█ ${name} ${isError ? "出错" : "结果"}：${content}`),
-    onCompact: ({ strategy, droppedTurns, beforeTokens, afterTokens }) =>
+    onCompact: ({ strategy, droppedTurns, mergedBlocks, frozenBlocks, cursor, beforeTokens, afterTokens }) => {
+      const detail =
+        strategy === "merge"
+          ? `合并：${mergedBlocks}块→1块`
+          : strategy === "freeze"
+            ? `增量冻结：${droppedTurns} 轮 → 第${frozenBlocks}块`
+            : `截断：${droppedTurns} 轮旧对话`;
       console.log(
-        `\n  · 上下文压缩(${strategy === "summarize" ? "摘要" : "截断"})：${droppedTurns} 轮旧对话（~${beforeTokens} → ~${afterTokens} token）`,
-      ),
+        `\n  · 上下文压缩(${detail})：~${beforeTokens} → ~${afterTokens} token · 冻结块 ×${frozenBlocks} · 游标@${cursor}`,
+      );
+      // 冻结区变化(冻结/合并)时刷新 sidecar 派生缓存;截断不动冻结区,无需写。
+      if (strategy !== "truncate") {
+        const { blocks, cursors } = agent.frozenState();
+        writeSummary(sessionId, blocks, cursors);
+      }
+    },
     onApprove,
   });
 
@@ -321,8 +336,22 @@ async function main() {
   if (process.argv[2]) {
     const prior = loadSession(sessionId);
     if (prior.length) {
-      agent.loadHistory(prior);
-      console.log(`已恢复会话 ${sessionId}（${prior.length} 条消息）`);
+      // 记忆游标 sidecar(docs/28)：校验通过就用冻结块 + 游标之后逐字重建,免全量重摘;
+      // 校验不过/缺失/损坏 → 静默丢缓存,退回读全量(下次压缩重摘)。主流水才是唯一真相。
+      const cache = readSummary(sessionId);
+      const valid =
+        cache !== null &&
+        cache.cursor <= prior.length &&
+        (cache.cursor === prior.length || isUserInput(prior[cache.cursor]!));
+      if (valid) {
+        agent.loadHistoryWithFrozen(cache.blocks, cache.cursors, prior.slice(cache.cursor));
+        console.log(
+          `已恢复会话 ${sessionId}（${prior.length} 条消息 · 冻结块 ×${cache.blocks.length} · 游标@${cache.cursor}，免重摘）`,
+        );
+      } else {
+        agent.loadHistory(prior);
+        console.log(`已恢复会话 ${sessionId}（${prior.length} 条消息）`);
+      }
     } else {
       console.log(`会话 ${sessionId} 暂无记录，作为新会话开始`);
     }
@@ -382,8 +411,10 @@ async function main() {
     }
     if (text === "/context") {
       const s = agent.contextStats();
+      const frozen =
+        s.frozenBlocks > 0 ? ` · 冻结块 ×${s.frozenBlocks} · 游标@${s.cursor}` : "";
       console.log(
-        `上下文：~${s.tokens} token · ${s.messages} 条消息 · ${s.turns} 轮 · 含摘要 ${s.hasSummary ? "✓" : "✗"} · 软上限 ${s.maxContextTokens}`,
+        `上下文：~${s.tokens} token · ${s.messages} 条消息 · ${s.turns} 轮 · 含摘要 ${s.hasSummary ? "✓" : "✗"}${frozen} · 软上限 ${s.maxContextTokens}`,
       );
       // 提示词缓存(第22步):本会话累计用量,主 agent 与子 agent 分开显示。数值单位=token。
       const state = process.env.AGENT_CACHE === "0"

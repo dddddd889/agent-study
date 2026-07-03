@@ -49,17 +49,25 @@ function messageText(m: Message): string {
 // 为「摘要压缩」切分历史：保留最近 keepTurns 轮逐字，其余作为「旧轮」待摘要。
 // 在「真实用户输入」处对齐切分，保证 old 是整轮、recent 以真实 user 输入开头(都合法)。
 // 轮数 ≤ keepTurns 时 old 为空(没有可摘要的旧轮)。
+//
+// frozenCount：内存历史开头有几条是「冻结摘要块」(见 docs/28、记忆游标)。
+// 冻结区是不可动的前缀 —— 切分只在 messages.slice(frozenCount) 上找轮边界，
+// 返回的 old/recent 都**不含**冻结区(由调用方拼回),这样已冻结的块永不再被划进 old 重摘。
+// 缺省 0 时行为与旧版完全一致。
 export function splitForCompaction(
   messages: Message[],
   keepTurns: number,
+  frozenCount = 0,
 ): { old: Message[]; recent: Message[] } {
+  // frozenCount === 0 时不切片,保持返回原数组引用(旧调用方/测试依赖)。
+  const rest = frozenCount > 0 ? messages.slice(frozenCount) : messages;
   const starts: number[] = [];
-  messages.forEach((m, i) => {
+  rest.forEach((m, i) => {
     if (isUserInput(m)) starts.push(i);
   });
-  if (starts.length <= keepTurns) return { old: [], recent: messages };
+  if (starts.length <= keepTurns) return { old: [], recent: rest };
   const cut = starts[starts.length - keepTurns]!;
-  return { old: messages.slice(0, cut), recent: messages.slice(cut) };
+  return { old: rest.slice(0, cut), recent: rest.slice(cut) };
 }
 
 // 按「整轮」截断历史，使估算 token ≤ maxTokens。
@@ -68,27 +76,36 @@ export function splitForCompaction(
 //      不会出现孤儿 tool_result；
 //   2. 工具轮整轮保留或整轮丢弃，不拆散 tool_use / tool_result；
 //   3. 至少保留最近 1 轮（即使它自身就超预算 —— 那只能靠摘要进一步压缩）。
+//
+// frozenCount：开头的冻结摘要块**永不丢弃**。截断只在 frozenCount 之后的逐字轮里
+// 找边界丢最旧的,冻结区始终原样保留并拼在结果最前。用作「增量冻结的摘要失败」兜底
+// (见 docs/28)：一次网络抖动不该把辛苦攒下的长期摘要截掉。缺省 0 时行为同旧版。
 // 纯函数：返回新数组（或原数组），不修改入参。
 export function truncateHistory(
   messages: Message[],
   maxTokens: number,
+  frozenCount = 0,
 ): Message[] {
   if (estimateTokens(messages) <= maxTokens) return messages;
 
-  // 所有「轮起点」的下标。
+  const frozen = frozenCount > 0 ? messages.slice(0, frozenCount) : [];
+  const frozenTokens = estimateTokens(frozen);
+  const withFrozen = (start: number): Message[] =>
+    frozenCount > 0 ? [...frozen, ...messages.slice(start)] : messages.slice(start);
+
+  // frozenCount 之后所有「轮起点」的绝对下标(冻结区不参与截断)。
   const starts: number[] = [];
   messages.forEach((m, i) => {
-    if (isUserInput(m)) starts.push(i);
+    if (i >= frozenCount && isUserInput(m)) starts.push(i);
   });
   if (starts.length === 0) return messages; // 没有可对齐的边界，保守不动
 
-  // 从最旧到最新，找第一个「从这里保留到结尾」能落进预算的轮起点。
-  // 越靠前保留的历史越多，所以第一个满足的就是最优解。
+  // 从最旧到最新，找第一个「冻结区 + 从这里保留到结尾」能落进预算的轮起点。
   for (const start of starts) {
-    if (estimateTokens(messages.slice(start)) <= maxTokens) {
-      return messages.slice(start);
+    if (frozenTokens + estimateTokens(messages.slice(start)) <= maxTokens) {
+      return withFrozen(start);
     }
   }
-  // 连最近一轮自身都超预算：仍保留最近 1 轮。
-  return messages.slice(starts[starts.length - 1]!);
+  // 连(冻结区 + 最近一轮)都超预算：仍保留冻结区 + 最近 1 轮。
+  return withFrozen(starts[starts.length - 1]!);
 }

@@ -509,11 +509,13 @@ describe("Agent 工具调用循环", () => {
     });
   }
 
-  test("超过 maxContextTokens：摘要旧轮、保留最近轮、触发 onCompact(summarize)", async () => {
+  test("超过 maxContextTokens：增量冻结旧轮、保留最近轮、触发 onCompact(freeze)", async () => {
     const events: Array<{ strategy: string }> = [];
     const agent = new Agent(summarizerLLM(), {
       maxContextTokens: 30, // 很小，强制压缩
       keepRecentTurns: 1,
+      mergeBlockThreshold: 100, // 关掉合并,隔离增量冻结
+      mergeZoneRatio: 100,
       onCompact: (info) => events.push(info),
     });
 
@@ -521,7 +523,7 @@ describe("Agent 工具调用循环", () => {
       await agent.send(`这是第${i}句话，用来把上下文撑长一点`);
     }
 
-    expect(events.some((e) => e.strategy === "summarize")).toBe(true);
+    expect(events.some((e) => e.strategy === "freeze")).toBe(true);
     // 压缩后历史以「摘要」消息开头
     const h = agent.getHistory();
     expect(typeof h[0]!.content).toBe("string");
@@ -559,6 +561,144 @@ describe("Agent 工具调用循环", () => {
     expect(s.turns).toBe(1);
     expect(s.hasSummary).toBe(false);
     expect(s.tokens).toBeGreaterThan(0);
+  });
+
+  // 记忆游标(docs/28)：每次摘要返回递增编号,便于验证「已冻结块不被重写」。
+  function countingSummarizerLLM(failAfter = Infinity) {
+    let n = 0;
+    return new FakeLLM((_messages, opts) => {
+      if (opts.system?.includes("摘要")) {
+        n++;
+        if (n > failAfter) throw new Error("summarize failed");
+        return `摘要#${n}`;
+      }
+      return { stopReason: "end_turn", content: [{ type: "text", text: "好的" }] };
+    });
+  }
+  // 数 history 开头连续的冻结块(以 [对话摘要] 开头的 user 字符串消息)。
+  function leadingFrozen(h: Message[]): string[] {
+    const out: string[] = [];
+    for (const m of h) {
+      if (m.role === "user" && typeof m.content === "string" && m.content.startsWith("[对话摘要]")) {
+        out.push(m.content);
+      } else break;
+    }
+    return out;
+  }
+
+  test("增量冻结：已冻结块跨多次压缩逐字不变（退化链断开）", async () => {
+    const agent = new Agent(countingSummarizerLLM(), {
+      maxContextTokens: 30,
+      keepRecentTurns: 1,
+      mergeBlockThreshold: 100, // 关合并,隔离增量冻结
+      mergeZoneRatio: 100,
+    });
+    for (let i = 1; i <= 6; i++) await agent.send(`这是第${i}句话，用来把上下文撑长一点`);
+
+    const blocks = leadingFrozen(agent.getHistory());
+    expect(blocks.length).toBeGreaterThan(1); // 多块并存,不是单块被反复重摘
+    // 第一块始终是「摘要#1」——从未被重新喂给模型改写
+    expect(blocks[0]).toBe("[对话摘要]\n摘要#1");
+    // 块按序累积、互不相同
+    expect(blocks[1]).toBe("[对话摘要]\n摘要#2");
+  });
+
+  test("增量冻结：生成新块时把已冻结块作只读上下文喂入，但只输出新块", async () => {
+    const llm = countingSummarizerLLM();
+    const agent = new Agent(llm, {
+      maxContextTokens: 30,
+      keepRecentTurns: 1,
+      mergeBlockThreshold: 100,
+      mergeZoneRatio: 100,
+    });
+    for (let i = 1; i <= 5; i++) await agent.send(`这是第${i}句话，用来把上下文撑长一点`);
+
+    // 摘要调用（system 含「摘要」）里,第 2 次及以后应带只读上下文 + 前一块文本。
+    const summaryCalls = llm.calls.filter((c) => c.system?.includes("摘要"));
+    expect(summaryCalls.length).toBeGreaterThan(1);
+    const second = summaryCalls[1]!.messages[0]!.content as string;
+    expect(second).toContain("只读上下文");
+    expect(second).toContain("摘要#1"); // 前一块作为参考被喂入
+  });
+
+  test("合并：冻结块到阈值 → 塌成一块、计数归零、触发 onCompact(merge)", async () => {
+    const events: Array<{ strategy: string; mergedBlocks?: number }> = [];
+    const agent = new Agent(countingSummarizerLLM(), {
+      maxContextTokens: 30,
+      keepRecentTurns: 1,
+      mergeBlockThreshold: 3, // 攒够 3 块就合并
+      mergeZoneRatio: 100, // 占比阈值关掉,只看块数
+      onCompact: (info) => events.push(info),
+    });
+    for (let i = 1; i <= 8; i++) await agent.send(`这是第${i}句话，用来把上下文撑长一点`);
+
+    const merge = events.find((e) => e.strategy === "merge");
+    expect(merge).toBeDefined();
+    expect(merge!.mergedBlocks).toBe(3); // 3 块参与合并
+    expect(events.some((e) => e.strategy === "freeze")).toBe(true); // 合并前先发生过冻结
+  });
+
+  test("可观测：contextStats 的冻结块数/游标随压缩更新", async () => {
+    const agent = new Agent(countingSummarizerLLM(), {
+      maxContextTokens: 30,
+      keepRecentTurns: 1,
+      mergeBlockThreshold: 100,
+      mergeZoneRatio: 100,
+    });
+    expect(agent.contextStats().frozenBlocks).toBe(0); // 起始无冻结块
+    expect(agent.contextStats().cursor).toBe(0);
+
+    for (let i = 1; i <= 5; i++) await agent.send(`这是第${i}句话，用来把上下文撑长一点`);
+
+    const s = agent.contextStats();
+    expect(s.frozenBlocks).toBeGreaterThan(0); // 压缩后有冻结块
+    expect(s.frozenBlocks).toBe(leadingFrozen(agent.getHistory()).length); // 与实际块数一致
+    expect(s.cursor).toBeGreaterThan(0); // 游标已前移
+    expect(s.hasSummary).toBe(true);
+  });
+
+  test("续聊重建：frozenState 导出 → loadHistoryWithFrozen 恢复冻结块与游标", async () => {
+    const a1 = new Agent(countingSummarizerLLM(), {
+      maxContextTokens: 30,
+      keepRecentTurns: 1,
+      mergeBlockThreshold: 100,
+      mergeZoneRatio: 100,
+    });
+    for (let i = 1; i <= 5; i++) await a1.send(`这是第${i}句话，用来把上下文撑长一点`);
+
+    const state = a1.frozenState();
+    expect(state.blocks.length).toBeGreaterThan(0);
+    expect(state.cursors.length).toBe(state.blocks.length); // 一一对应
+
+    // 新 agent 用 sidecar 状态 + 主流水尾巴重建(模拟续聊)。
+    const a2 = new Agent(countingSummarizerLLM());
+    const rest: Message[] = [{ role: "user", content: "续聊一句" }];
+    a2.loadHistoryWithFrozen(state.blocks, state.cursors, rest);
+
+    const s = a2.contextStats();
+    expect(s.frozenBlocks).toBe(state.blocks.length);
+    expect(s.cursor).toBe(state.cursors[state.cursors.length - 1]!);
+    const h = a2.getHistory();
+    // 冻结块原样在前、主流水尾巴逐字接上
+    expect(h.slice(0, state.blocks.length).map((m) => m.content)).toEqual(state.blocks);
+    expect(h[h.length - 1]!.content).toBe("续聊一句");
+  });
+
+  test("兜底：增量摘要失败 → 只截逐字轮，已冻结块不动", async () => {
+    const events: Array<{ strategy: string }> = [];
+    const agent = new Agent(countingSummarizerLLM(1), {
+      // 第 1 次摘要成功(得到 摘要#1),之后一律失败
+      maxContextTokens: 30,
+      keepRecentTurns: 1,
+      mergeBlockThreshold: 100,
+      mergeZoneRatio: 100,
+      onCompact: (info) => events.push(info),
+    });
+    for (let i = 1; i <= 6; i++) await agent.send(`这是第${i}句话，用来把上下文撑长一点`);
+
+    expect(events.some((e) => e.strategy === "truncate")).toBe(true); // 后续失败退截断
+    // 冻结块「摘要#1」在多次截断后仍原样保留在最前
+    expect(leadingFrozen(agent.getHistory())[0]).toBe("[对话摘要]\n摘要#1");
   });
 
   test("onToolCall / onToolResult 回调会被触发", async () => {

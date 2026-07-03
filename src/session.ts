@@ -5,7 +5,9 @@ import {
   mkdirSync,
   readdirSync,
   readFileSync,
+  rmSync,
   statSync,
+  writeFileSync,
 } from "node:fs";
 import { join } from "node:path";
 import type { Message } from "./types";
@@ -82,6 +84,65 @@ export function listSessions(): Array<{
 
 function subagentDir(mainId: string): string {
   return join(sessionsDir(), mainId, "agents");
+}
+
+// ── 记忆游标 sidecar(第04步 / docs/28) ──────────────────────────────
+// 旁挂 <sessionsDir>/<id>/summary.jsonl 的【派生缓存】：一行一个冻结块 + cursorAfter。
+// 主流水 <id>.jsonl 才是唯一真相 —— sidecar 可自由重写(合并时)、可整体丢弃(校验不过就重摘),
+// 丢了自愈、绝不因它丢历史。只主 agent 落盘(子 agent 不续聊)。
+function summaryPath(id: string): string {
+  return join(sessionsDir(), id, "summary.jsonl");
+}
+
+interface FrozenBlockLine {
+  seq: number; // 1 起的块序号
+  cursorAfter: number; // 折进本块(含)后的原始消息累计数
+  text: string; // 冻结块完整内容(含 [对话摘要] 前缀)
+}
+
+// 重写整个 sidecar（派生缓存,允许重写；合并会让行数变少）。空冻结区则删除文件。
+export function writeSummary(
+  id: string,
+  blocks: string[],
+  cursors: number[],
+): void {
+  const path = summaryPath(id);
+  if (blocks.length === 0) {
+    if (existsSync(path)) rmSync(path);
+    return;
+  }
+  mkdirSync(join(sessionsDir(), id), { recursive: true });
+  const lines =
+    blocks
+      .map((text, i) =>
+        JSON.stringify({
+          seq: i + 1,
+          cursorAfter: cursors[i] ?? 0,
+          text,
+        } satisfies FrozenBlockLine),
+      )
+      .join("\n") + "\n";
+  writeFileSync(path, lines, "utf-8");
+}
+
+// 读回 sidecar：{blocks, cursors, cursor}。文件缺失/损坏 → null(调用方退回全量重摘)。
+export function readSummary(
+  id: string,
+): { blocks: string[]; cursors: number[]; cursor: number } | null {
+  const path = summaryPath(id);
+  if (!existsSync(path)) return null;
+  try {
+    const rows = readFileSync(path, "utf-8")
+      .split("\n")
+      .filter((l) => l.trim() !== "")
+      .map((l) => JSON.parse(l) as FrozenBlockLine);
+    if (rows.length === 0) return null;
+    const blocks = rows.map((r) => r.text);
+    const cursors = rows.map((r) => r.cursorAfter);
+    return { blocks, cursors, cursor: cursors[cursors.length - 1] ?? 0 };
+  } catch {
+    return null; // 损坏 → 丢缓存,自愈
+  }
 }
 
 // 追加子 agent 本轮消息(每条一行,append-only),自动建目录。

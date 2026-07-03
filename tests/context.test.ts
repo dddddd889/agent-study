@@ -124,4 +124,60 @@ describe("splitForCompaction", () => {
     expect(recent[0]!.role).toBe("user");
     expect(typeof recent[0]!.content).toBe("string");
   });
+
+  describe("带冻结偏移 frozenCount", () => {
+    // 开头 1 条冻结块 + 3 轮逐字。
+    const frozen: Message[] = [{ role: "user", content: "[对话摘要]\nS1" }];
+    const hz: Message[] = [...frozen, ...h];
+
+    test("old/recent 都不含冻结区", () => {
+      const { old, recent } = splitForCompaction(hz, 1, 1);
+      // 冻结块(下标 0)既不在 old 也不在 recent
+      expect(old).not.toContainEqual(frozen[0]);
+      expect(recent).not.toContainEqual(frozen[0]);
+      // 中间段 = 冻结区之后、最近 1 轮之前
+      expect(old).toEqual(h.slice(0, 4));
+      expect(recent).toEqual(h.slice(4));
+    });
+
+    test("冻结区之后轮数 ≤ K 时 old 为空", () => {
+      const { old, recent } = splitForCompaction(hz, 3, 1);
+      expect(old).toEqual([]);
+      expect(recent).toEqual(h); // 冻结区被跳过,rest 即 h
+    });
+
+    test("切点仍对齐真实用户输入", () => {
+      const { recent } = splitForCompaction(hz, 2, 1);
+      expect(recent[0]!.role).toBe("user");
+      expect(typeof recent[0]!.content).toBe("string");
+    });
+  });
+});
+
+describe("truncateHistory 带冻结偏移", () => {
+  const frozen: Message[] = [
+    { role: "user", content: "[对话摘要]\nS1" },
+    { role: "user", content: "[对话摘要]\nS2" },
+  ];
+  const tail: Message[] = [
+    { role: "user", content: "第一句" },
+    { role: "assistant", content: "回复一" },
+    { role: "user", content: "第二句" },
+    { role: "assistant", content: "回复二" },
+  ];
+
+  test("冻结区永不丢弃：极小预算仍保留全部冻结块", () => {
+    const h = [...frozen, ...tail];
+    const out = truncateHistory(h, 1, frozen.length);
+    // 前两条冻结块原样在最前
+    expect(out.slice(0, 2)).toEqual(frozen);
+    // 逐字区被截到只剩最近 1 轮
+    expect(out.length).toBeLessThan(h.length);
+    expect(out[2]!.content).toBe("第二句");
+  });
+
+  test("frozenCount=0 时与旧行为一致", () => {
+    const h = [...frozen, ...tail];
+    expect(truncateHistory(h, 1)).toEqual(truncateHistory(h, 1, 0));
+  });
 });
