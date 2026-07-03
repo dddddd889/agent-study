@@ -4,6 +4,7 @@ import {
   splitForCompaction,
   truncateHistory,
 } from "./context";
+import { collectStream, extractText } from "./llm";
 import {
   initialMode,
   modeSystemLine,
@@ -11,10 +12,8 @@ import {
   resolvePolicy,
 } from "./permission";
 import type {
-  ContentBlock,
   LLM,
   Message,
-  TextBlock,
   Tool,
   ToolResultBlock,
   ToolUseBlock,
@@ -225,15 +224,16 @@ export class Agent {
           signal,
           thinking: this.thinking, // 省略=跟随 LLM env;子 agent 关思考时为 false
           onThinkingDelta: this.onThinkingDelta,
+          // 中断兜底:被中断时正常 return 走不到,靠这里补记已烧掉的 usage。
+          onUsage: (u) => this.recordMainUsage(u),
         });
-        let chunk = await it.next();
-        while (!chunk.done) {
-          partialText += chunk.value;
-          this.onTextDelta?.(chunk.value);
-          chunk = await it.next();
-        }
-        const res = chunk.value;
-        this.addUsage(res.usage); // 累计本会话用量(含缓存读写),供 /context 观测
+        // 收流(边收边显示):onDelta 同时做实时显示 + 累进 partialText;
+        // 累积在外层,这样中断抛错时半截文本仍留得住(见下方 catch)。
+        const { response: res } = await collectStream(it, (t) => {
+          partialText += t;
+          this.onTextDelta?.(t);
+        });
+        this.recordMainUsage(res.usage); // 正常完成:累计本会话用量(含缓存读写),供 /context 观测
         signal?.throwIfAborted();
 
         // 被 max_tokens 截断 => 这次输出是残缺的，直接报清楚错。
@@ -250,7 +250,7 @@ export class Agent {
 
         // 没有工具调用 => 最终答复。纯文本存成字符串，更直观。
         if (toolUses.length === 0) {
-          const text = this.extractText(res.content);
+          const text = extractText(res.content);
           commit({ role: "assistant", content: text });
           this.onTurnComplete?.(added);
           return text;
@@ -333,8 +333,10 @@ export class Agent {
     }
   }
 
-  // 累加主 agent 自己一次调用的用量(主循环/摘要都算主桶;缺省则跳过)。见第22步。
-  private addUsage(u?: Usage): void {
+  // 累加「主桶」用量:主循环 / 摘要 / 后台记忆抽取都算主桶(缺省则跳过)。见第22步。
+  // 公开:记忆抽取在 CLI 里调(见 cli.ts),对子 agent 而言这就是它自己 usageMain
+  // 的入口——finalizeOnBudget 那次直连 llm 的用量也经此计入。
+  recordMainUsage(u?: Usage): void {
     addUsageInto(this.usageMain, u);
   }
 
@@ -443,16 +445,16 @@ export class Agent {
             transcript,
         },
       ],
-      { system: SUMMARY_SYSTEM, signal, thinking: false }, // 摘要是工具调用,不思考(省 token)
+      {
+        system: SUMMARY_SYSTEM,
+        signal,
+        thinking: false, // 摘要是工具调用,不思考(省 token)
+        onUsage: (u) => this.recordMainUsage(u), // 中断兜底:同主循环
+      },
     );
-    let text = "";
-    let step = await it.next();
-    while (!step.done) {
-      text += step.value;
-      step = await it.next();
-    }
-    this.addUsage(step.value.usage); // 摘要这次调用的用量也计入本会话
-    return text || this.extractText(step.value.content);
+    const { text, response } = await collectStream(it); // 静默收(含空流兜底)
+    this.recordMainUsage(response.usage); // 正常完成:计入本会话
+    return text;
   }
 
   // 安全闸（第24步：权限模式）：判断一个工具调用是否被放行。
@@ -535,13 +537,6 @@ export class Agent {
   }
 
   // 从内容块里抽取纯文本并拼接，作为最终回复字符串。
-  private extractText(content: ContentBlock[]): string {
-    return content
-      .filter((b): b is TextBlock => b.type === "text")
-      .map((b) => b.text)
-      .join("");
-  }
-
   // 返回历史副本，避免外部直接改内部数组。
   getHistory(): Message[] {
     return [...this.history];

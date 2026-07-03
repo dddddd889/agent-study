@@ -127,4 +127,25 @@ describe("提示词缓存:stream 抓 usage", () => {
       output: 42, // message_delta 的最终值覆盖 message_start 的初始 1
     });
   });
+
+  test("正常读完【不】触发 onUsage(usage 随 return 交出,避免重复计费)", async () => {
+    mockSSE([
+      { type: "message_start", message: { usage: { input_tokens: 5, output_tokens: 1 } } },
+      { type: "content_block_start", index: 0, content_block: { type: "text", text: "" } },
+      { type: "content_block_delta", index: 0, delta: { type: "text_delta", text: "hi" } },
+      { type: "content_block_stop", index: 0 },
+      { type: "message_delta", delta: { stop_reason: "end_turn" }, usage: { output_tokens: 9 } },
+    ]);
+
+    const seen: unknown[] = [];
+    const llm = new AnthropicLLM({ authToken: "t" });
+    const it = llm.stream([{ role: "user", content: "hi" }], {
+      onUsage: (u) => seen.push(u), // 只该在中断时触发
+    });
+    let step = await it.next();
+    while (!step.done) step = await it.next();
+
+    expect(seen).toHaveLength(0); // 正常路径:finally 里的 onUsage 不触发
+    expect(step.value.usage?.output).toBe(9); // usage 仍随 return 交出
+  });
 });

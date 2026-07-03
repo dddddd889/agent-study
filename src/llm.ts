@@ -4,8 +4,38 @@ import type {
   LLM,
   LLMResponse,
   Message,
+  TextBlock,
   Usage,
 } from "./types";
+
+// 从内容块里取出拼接后的答复文本(只认 text 块)。stream() 空流兜底、
+// 主循环封口都用它。
+export function extractText(content: ContentBlock[]): string {
+  return content
+    .filter((b): b is TextBlock => b.type === "text")
+    .map((b) => b.text)
+    .join("");
+}
+
+// 收流:把 stream() 生成器一路读到底,收成 {text, response}。
+//   收流(gen)          → 静默收(记忆抽取 / 摘要 / 子 agent 收尾)
+//   收流(gen, onDelta) → 边收边把每个文本增量转发出去(主循环:实时显示 + 半截留存)
+// text = yield 出的文本;流没吐文本时从 response.content 的 text 块兜底。
+// 不 trim、不碰 signal、不计 usage —— 那些都是调用点各自的事(usage 计到哪个桶因人而异)。
+export async function collectStream(
+  gen: AsyncGenerator<string, LLMResponse>,
+  onDelta?: (text: string) => void,
+): Promise<{ text: string; response: LLMResponse }> {
+  let text = "";
+  let step = await gen.next();
+  while (!step.done) {
+    text += step.value;
+    onDelta?.(step.value);
+    step = await gen.next();
+  }
+  const response = step.value;
+  return { text: text || extractText(response.content), response };
+}
 
 // 给内容块挂缓存断点(第22步)。content 可能是字符串(转成单个 text 块)或块数组
 // (克隆后在最后一块加 cache_control);空/异常原样返回。绝不改传入对象。
@@ -199,69 +229,79 @@ export class AnthropicLLM implements LLM {
     // token 用量(含缓存读写):message_start 给输入/缓存,message_delta 给最终输出。
     const usage: Usage = { input: 0, output: 0, cacheRead: 0, cacheCreation: 0 };
 
-    for await (const evt of parseSSE(res.body)) {
-      switch (evt.type) {
-        case "content_block_start": {
-          const cb = evt.content_block;
-          if (cb.type === "text") {
-            blocks[evt.index] = { type: "text", text: cb.text ?? "" };
-          } else if (cb.type === "thinking") {
-            // 扩展思考块(第27步):thinking 正文 + signature 签名(随后由 delta 补齐)。
-            blocks[evt.index] = { type: "thinking", thinking: cb.thinking ?? "", signature: cb.signature ?? "" };
-          } else if (cb.type === "redacted_thinking") {
-            blocks[evt.index] = { type: "redacted_thinking", data: cb.data ?? "" };
-          } else if (cb.type === "tool_use") {
-            blocks[evt.index] = { type: "tool_use", id: cb.id, name: cb.name, input: {} };
-            toolJson[evt.index] = "";
+    // finished 用于区分「正常读完」与「中途抛错(如用户中断)」:
+    // 正常路径靠 return 交出 usage;中断路径靠 finally 里的 onUsage 补记已产生的花费,
+    // 否则被中断这次调用烧掉的 token 会漏计(见 agent.ts 主循环)。
+    let finished = false;
+    try {
+      for await (const evt of parseSSE(res.body)) {
+        switch (evt.type) {
+          case "content_block_start": {
+            const cb = evt.content_block;
+            if (cb.type === "text") {
+              blocks[evt.index] = { type: "text", text: cb.text ?? "" };
+            } else if (cb.type === "thinking") {
+              // 扩展思考块(第27步):thinking 正文 + signature 签名(随后由 delta 补齐)。
+              blocks[evt.index] = { type: "thinking", thinking: cb.thinking ?? "", signature: cb.signature ?? "" };
+            } else if (cb.type === "redacted_thinking") {
+              blocks[evt.index] = { type: "redacted_thinking", data: cb.data ?? "" };
+            } else if (cb.type === "tool_use") {
+              blocks[evt.index] = { type: "tool_use", id: cb.id, name: cb.name, input: {} };
+              toolJson[evt.index] = "";
+            }
+            break;
           }
-          break;
-        }
-        case "content_block_delta": {
-          const d = evt.delta;
-          if (d.type === "text_delta") {
+          case "content_block_delta": {
+            const d = evt.delta;
+            if (d.type === "text_delta") {
+              const b = blocks[evt.index];
+              if (b && b.type === "text") b.text += d.text;
+              yield d.text; // 只把文本增量吐给上层显示
+            } else if (d.type === "thinking_delta") {
+              // 思考正文增量:累进块 + 走 onThinkingDelta 暗色显示,【不 yield】(不混进答复)。
+              const b = blocks[evt.index];
+              if (b && b.type === "thinking") b.thinking += d.thinking ?? "";
+              opts.onThinkingDelta?.(d.thinking ?? "");
+            } else if (d.type === "signature_delta") {
+              const b = blocks[evt.index];
+              if (b && b.type === "thinking") b.signature += d.signature ?? "";
+            } else if (d.type === "input_json_delta") {
+              // 工具参数是逐碎片来的 JSON 文本，先累积，等块结束再 parse。
+              toolJson[evt.index] = (toolJson[evt.index] ?? "") + (d.partial_json ?? "");
+            }
+            break;
+          }
+          case "content_block_stop": {
             const b = blocks[evt.index];
-            if (b && b.type === "text") b.text += d.text;
-            yield d.text; // 只把文本增量吐给上层显示
-          } else if (d.type === "thinking_delta") {
-            // 思考正文增量:累进块 + 走 onThinkingDelta 暗色显示,【不 yield】(不混进答复)。
-            const b = blocks[evt.index];
-            if (b && b.type === "thinking") b.thinking += d.thinking ?? "";
-            opts.onThinkingDelta?.(d.thinking ?? "");
-          } else if (d.type === "signature_delta") {
-            const b = blocks[evt.index];
-            if (b && b.type === "thinking") b.signature += d.signature ?? "";
-          } else if (d.type === "input_json_delta") {
-            // 工具参数是逐碎片来的 JSON 文本，先累积，等块结束再 parse。
-            toolJson[evt.index] = (toolJson[evt.index] ?? "") + (d.partial_json ?? "");
+            if (b && b.type === "tool_use") {
+              const raw = toolJson[evt.index] ?? "";
+              b.input = raw ? JSON.parse(raw) : {};
+            }
+            break;
           }
-          break;
-        }
-        case "content_block_stop": {
-          const b = blocks[evt.index];
-          if (b && b.type === "tool_use") {
-            const raw = toolJson[evt.index] ?? "";
-            b.input = raw ? JSON.parse(raw) : {};
+          case "message_start": {
+            // message_start.message.usage 带输入/缓存读写(以及初始 output)。
+            const u = evt.message?.usage;
+            if (u) {
+              usage.input = u.input_tokens ?? 0;
+              usage.cacheRead = u.cache_read_input_tokens ?? 0;
+              usage.cacheCreation = u.cache_creation_input_tokens ?? 0;
+              usage.output = u.output_tokens ?? 0;
+            }
+            break;
           }
-          break;
-        }
-        case "message_start": {
-          // message_start.message.usage 带输入/缓存读写(以及初始 output)。
-          const u = evt.message?.usage;
-          if (u) {
-            usage.input = u.input_tokens ?? 0;
-            usage.cacheRead = u.cache_read_input_tokens ?? 0;
-            usage.cacheCreation = u.cache_creation_input_tokens ?? 0;
-            usage.output = u.output_tokens ?? 0;
+          case "message_delta": {
+            if (evt.delta?.stop_reason) stopReason = evt.delta.stop_reason;
+            if (evt.usage?.output_tokens != null) usage.output = evt.usage.output_tokens; // 最终输出
+            break;
           }
-          break;
+          // message_stop 不需要特殊处理
         }
-        case "message_delta": {
-          if (evt.delta?.stop_reason) stopReason = evt.delta.stop_reason;
-          if (evt.usage?.output_tokens != null) usage.output = evt.usage.output_tokens; // 最终输出
-          break;
-        }
-        // message_stop 不需要特殊处理
       }
+      finished = true;
+    } finally {
+      // 中途抛错(用户中断)时补记已产生的 usage;正常读完由下面的 return 交出。
+      if (!finished) opts.onUsage?.(usage);
     }
 
     return { stopReason, content: blocks.filter(Boolean), usage };

@@ -1,5 +1,6 @@
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
-import type { LLM, Message } from "./types";
+import { collectStream } from "./llm";
+import type { LLM, Message, Usage } from "./types";
 
 // 跨会话长期记忆:把对话里值得长期记住的「事实/偏好/决定」沉淀成一份全局记忆,
 // 跨会话注入上下文(而不是塞原始历史流水)。
@@ -24,12 +25,14 @@ const MEMORY_SYSTEM =
   "只输出更新后的【完整】记忆，不要寒暄或解释。";
 
 // 「记忆 agent」:读 当前记忆 + 本次对话 → 输出合并去重后的完整记忆。
-// 就是一个聚焦的 LLM 调用(无工具),drain 流取文本。由 CLI 在每轮后【后台】调用。
+// 就是一个聚焦的 LLM 调用(无工具),收流取文本。由 CLI 在每轮后【后台】调用。
+// 返回记忆文本 + 这次调用的 usage —— 后台照样烧 token,交给 CLI 计入会话主用量
+// (别再像以前那样把 usage 丢在地上)。
 export async function extractMemory(
   llm: LLM,
   history: Message[],
   current: string,
-): Promise<string> {
+): Promise<{ memory: string; usage?: Usage }> {
   const transcript = history
     .map((m) => {
       // 第27步:剔除思考块——它是模型草稿(含被丢弃的假设 + 一大坨签名),
@@ -55,11 +58,6 @@ export async function extractMemory(
     system: MEMORY_SYSTEM,
     thinking: false,
   });
-  let out = "";
-  let step = await it.next();
-  while (!step.done) {
-    out += step.value;
-    step = await it.next();
-  }
-  return out.trim();
+  const { text, response } = await collectStream(it); // 静默收(含空流兜底)
+  return { memory: text.trim(), usage: response.usage };
 }

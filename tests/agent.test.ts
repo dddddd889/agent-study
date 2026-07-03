@@ -290,6 +290,40 @@ describe("Agent 工具调用循环", () => {
     expect(added).toHaveLength(1); // 中断也触发了落盘回调
   });
 
+  test("中断也计入 usage:onUsage 把半截花费记进主桶", async () => {
+    // 模拟真实 stream():被中断时抛错,但在 finally 里通过 onUsage 吐出已产生的 usage。
+    const llm: LLM = {
+      async *stream(_messages, opts) {
+        try {
+          yield "半";
+          await new Promise((_r, rej) =>
+            opts?.signal?.addEventListener("abort", () =>
+              rej(new Error("aborted")),
+            ),
+          );
+          return { stopReason: "end_turn", content: [] };
+        } finally {
+          opts?.onUsage?.({ input: 12, output: 3, cacheRead: 0, cacheCreation: 0 });
+        }
+      },
+    };
+    const agent = new Agent(llm);
+
+    const ac = new AbortController();
+    const p = agent.send("问题", { signal: ac.signal });
+    await new Promise((r) => setTimeout(r, 10));
+    ac.abort();
+    await expect(p).rejects.toThrow();
+
+    // 被中断这次调用烧掉的 token 仍进了主桶,而不是丢在地上。
+    expect(agent.contextStats().usage.main).toEqual({
+      input: 12,
+      output: 3,
+      cacheRead: 0,
+      cacheCreation: 0,
+    });
+  });
+
   test("中断封口（工具中）：给未完成 tool_use 补 is_error 取消结果", async () => {
     const hangTool: Tool = {
       name: "hang",

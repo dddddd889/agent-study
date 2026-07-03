@@ -131,6 +131,9 @@ export interface CompleteOptions {
   thinking?: boolean;
   // 思考正文增量回调(暗色显示);不 yield,避免混进答复文本。
   onThinkingDelta?: (text: string) => void;
+  // 中断兜底:流【中途抛错】(如用户中断)时,把已产生的 usage 回调出来。
+  // 正常读完不触发(那时 usage 随 return 的 LLMResponse 交出)。见 stream() 的 finally。
+  onUsage?: (usage: Usage) => void;
 }
 
 // LLM 抽象接口：给定历史消息（和可选 system / tools），流式产出助手的下一步输出。

@@ -8,7 +8,7 @@ import {
   SUBAGENT_SYSTEM,
   createDispatchAgentTool,
 } from "../src/subagent";
-import type { LLMResponse, Message, Tool } from "../src/types";
+import type { LLM, LLMResponse, Message, Tool, Usage } from "../src/types";
 import { FakeLLM } from "./fake-llm";
 
 // 全程离线:用临时目录接管子 agent 存档,避免污染真实 .sessions/。
@@ -261,5 +261,50 @@ describe("dispatch_agent:存档与失败语义", () => {
       .flatMap((m) => (Array.isArray(m.content) ? m.content : []))
       .find((b) => b.type === "tool_result" && b.tool_use_id === "m1");
     expect(errBlock && errBlock.type === "tool_result" ? errBlock.is_error : false).toBe(true);
+  });
+});
+
+describe("子 agent usage 上卷", () => {
+  test("子 agent 被中断:半截 usage 仍上卷到父的子桶", async () => {
+    const rolledUp: Array<{ id: string; usage: Usage }> = [];
+    // 子 agent 的 LLM:yield 半截 → 等 abort → 抛错;finally 里靠 onUsage 吐出已产生的 usage
+    // (模拟真实 stream() 的中断兜底)。
+    const llm: LLM = {
+      async *stream(_messages, opts) {
+        try {
+          yield "半";
+          await new Promise((_r, rej) =>
+            opts?.signal?.addEventListener("abort", () =>
+              rej(new Error("aborted")),
+            ),
+          );
+          return { stopReason: "end_turn", content: [] };
+        } finally {
+          opts?.onUsage?.({ input: 7, output: 2, cacheRead: 0, cacheCreation: 0 });
+        }
+      },
+    };
+    let dispatchTool: Tool;
+    dispatchTool = createDispatchAgentTool({
+      llm,
+      getTools: () => [dispatchTool],
+      getSessionId: () => "sess-interrupt",
+      onSubUsage: (id, usage) => rolledUp.push({ id, usage }),
+    });
+
+    const ac = new AbortController();
+    const p = dispatchTool.run({ prompt: "子任务" }, { signal: ac.signal });
+    await new Promise((r) => setTimeout(r, 10));
+    ac.abort();
+    await expect(p).rejects.toThrow();
+
+    // 中断也上卷:子 agent 半截烧掉的 token 进了父的子桶,而不是丢在地上。
+    expect(rolledUp).toHaveLength(1);
+    expect(rolledUp[0]!.usage).toEqual({
+      input: 7,
+      output: 2,
+      cacheRead: 0,
+      cacheCreation: 0,
+    });
   });
 });

@@ -1,5 +1,6 @@
 import { randomBytes } from "node:crypto";
 import { Agent, type AgentOptions } from "./agent";
+import { collectStream } from "./llm";
 import {
   DEFAULT_ROLE,
   promptRoleNames,
@@ -66,24 +67,18 @@ function isStepLimitError(err: unknown): boolean {
 }
 
 // 用尽步数预算时的【收尾】:不再给工具,让子 agent 基于现有历史直接给出阶段性结论。
+// 返回结论文本 + 这次调用的 usage —— 这次直连 llm 的用量得计入子 agent 自己的桶
+// (以前漏掉了)。onUsage 是【中断兜底】:被打断时正常 return 走不到,靠它补记(同主循环)。
 async function finalizeOnBudget(
   llm: LLM,
   system: string,
   history: Message[],
   signal?: AbortSignal,
-): Promise<string> {
-  const it = llm.stream(history, { system, signal }); // 不传 tools → 只能汇成文字
-  let text = "";
-  let step = await it.next();
-  while (!step.done) {
-    text += step.value;
-    step = await it.next();
-  }
-  if (text) return text;
-  return step.value.content
-    .filter((b) => b.type === "text")
-    .map((b) => (b.type === "text" ? b.text : ""))
-    .join("");
+  onUsage?: (u: Usage) => void,
+): Promise<{ text: string; usage?: Usage }> {
+  const it = llm.stream(history, { system, signal, onUsage }); // 不传 tools → 只能汇成文字
+  const { text, response } = await collectStream(it); // 静默收(含空流兜底)
+  return { text, usage: response.usage };
 }
 
 // 统计「干活步数」:发起过【非辅助】tool_use 的 assistant 轮数(口径同主 agent)。
@@ -153,22 +148,32 @@ async function runSubagent(
   let conclusion = "";
   let truncated = false;
   try {
-    conclusion = (await sub.send(prompt, { signal })).trim();
-  } catch (err) {
-    if (signal?.aborted) throw err; // 用户中断:照旧上抛
-    if (!isStepLimitError(err)) throw err; // 其它错误:如实上抛 → is_error
-    // 用尽步数预算:不硬失败、不丢工作,收尾给出阶段性结论,并手动落档。
-    truncated = true;
-    conclusion = (await finalizeOnBudget(llm, role.system, sub.getHistory(), signal)).trim();
-    appendSubagentMessages(mainId, id, [
-      ...sub.getHistory(),
-      { role: "assistant", content: conclusion },
-    ]);
+    try {
+      conclusion = (await sub.send(prompt, { signal })).trim();
+    } catch (err) {
+      if (signal?.aborted) throw err; // 用户中断:照旧上抛
+      if (!isStepLimitError(err)) throw err; // 其它错误:如实上抛 → is_error
+      // 用尽步数预算:不硬失败、不丢工作,收尾给出阶段性结论,并手动落档。
+      truncated = true;
+      const fin = await finalizeOnBudget(
+        llm,
+        role.system,
+        sub.getHistory(),
+        signal,
+        (u) => sub.recordMainUsage(u), // 中断兜底:收尾被打断也计进子桶
+      );
+      conclusion = fin.text.trim();
+      sub.recordMainUsage(fin.usage); // 正常完成:收尾那次直连 llm 的用量计入子桶
+      appendSubagentMessages(mainId, id, [
+        ...sub.getHistory(),
+        { role: "assistant", content: conclusion },
+      ]);
+    }
+  } finally {
+    // 回传这个子 agent 的总 token 用量(含它内部的摘要 + 撞满步数时的收尾),
+    // 供主层归到「子 agent」桶。放 finally:中断/出错时也上卷,不把已烧的 token 丢在地上。
+    deps.onSubUsage?.(id, sub.totalUsage());
   }
-
-  // 回传这个子 agent 的总 token 用量(含它内部的摘要),供主层归到「子 agent」桶。
-  // 注:撞满步数走 finalizeOnBudget 那次直连 llm 的用量未计入(边角,忽略)。
-  deps.onSubUsage?.(id, sub.totalUsage());
 
   if (!conclusion) {
     throw new Error(`子 agent ${id} 未产出结论(工具连续失败或收尾为空)`);

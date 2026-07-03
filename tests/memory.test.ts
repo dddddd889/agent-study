@@ -34,7 +34,7 @@ describe("extractMemory（记忆 agent）", () => {
       opts.system?.includes("记忆") ? "- 用户叫小明\n- 偏好蓝色" : "好的",
     );
 
-    const next = await extractMemory(
+    const { memory } = await extractMemory(
       llm,
       [
         { role: "user", content: "我叫小明，喜欢蓝色" },
@@ -43,6 +43,6 @@ describe("extractMemory（记忆 agent）", () => {
       "", // 当前记忆为空
     );
 
-    expect(next).toBe("- 用户叫小明\n- 偏好蓝色");
+    expect(memory).toBe("- 用户叫小明\n- 偏好蓝色");
   });
 });

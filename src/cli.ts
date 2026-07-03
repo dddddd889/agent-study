@@ -302,8 +302,13 @@ async function main() {
     memoryRunning = true;
     lastMemoryRun = (async () => {
       try {
-        const next = await extractMemory(llm, agent.getHistory(), readMemory());
+        const { memory: next, usage } = await extractMemory(
+          llm,
+          agent.getHistory(),
+          readMemory(),
+        );
         if (next) writeMemory(next); // 空结果不覆盖,避免清空记忆
+        agent.recordMainUsage(usage); // 后台照样烧 token,计入会话主用量
       } catch {
         // 后台失败：静默,不影响主对话
       } finally {
@@ -486,7 +491,11 @@ async function main() {
   if (agent.getHistory().length > 0) {
     process.stdout.write("正在保存长期记忆…\n");
     try {
-      const next = await extractMemory(llm, agent.getHistory(), readMemory());
+      const { memory: next } = await extractMemory(
+        llm,
+        agent.getHistory(),
+        readMemory(),
+      );
       if (next) writeMemory(next);
     } catch {
       // 退出时记忆保存失败：忽略
