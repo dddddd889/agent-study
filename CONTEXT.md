@@ -148,3 +148,21 @@ _Avoid_：私有 IP 黑名单（那是防 SSRF）、沙箱
 **fail-closed（不保则拒）**：
 安全护栏的默认姿态：不能保证安全时**拒绝执行**而非放行。执行沙箱不可用（无 `sandbox-exec`/`bwrap`）→ 禁 shell 并提示，而不是静默裸跑。反义是 fail-open（出问题也照跑）。
 _Avoid_：fail-safe（含义相近但易混）、默认拒绝
+
+### 扩展思考
+
+**扩展思考（extended thinking）**：
+让模型在给出答复前先输出一段**推理过程**。请求体加 `thinking:{type:"enabled",budget_tokens:N}` 开启;第 27 步实现。默认关，`AGENT_THINKING=1` 开、`AGENT_THINKING_BUDGET` 定预算（默认 16000，`budget < max_tokens`）。
+_Avoid_：推理、reasoning（口语可，正式用「扩展思考」）、CoT
+
+**思考块（thinking block）**：
+模型产出的一类内容块 `{type:"thinking",thinking,signature}`（以及加密的 `redacted_thinking`）。思考正文经 `onThinkingDelta` 暗色流式显示，**不混进答复文本**（`extractText` 只取 `text` 块）。
+_Avoid_：思考消息、reasoning block
+
+**历史保真（thinking fidelity）**：
+思考块必须**原样**（含 `signature`）存进会话历史并回传——带工具调用的轮里缺思考块会被 API 拒。压缩对它「整轮保留 or 整轮丢弃、绝不改写」（靠「切点只在真实用户输入」的整轮不变量）;JSONL 落盘保真、续聊读回原样;但**长期记忆抽取剔除思考块**（草稿非事实、且省 token）。
+_Avoid_：保留思考、思考持久化
+
+**思考预算（thinking budget）**：
+`budget_tokens`：思考最多花多少 token，占 `max_tokens` 的一部分（故须 `budget < max_tokens`，否则报错;`< 1024` 夹到 1024）。内部工具调用（摘要、记忆抽取）传 `thinking:false` 不思考;子 agent 默认继承、`AGENT_SUBAGENT_THINKING=0` 可关。
+_Avoid_：思考上限、token 预算（泛指时）

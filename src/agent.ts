@@ -42,6 +42,10 @@ export interface AgentOptions {
   keepRecentTurns?: number;
   // 模型回复的文本增量回调，便于 CLI 边生成边显示（流式）。
   onTextDelta?: (text: string) => void;
+  // 扩展思考(第27步):思考正文增量回调(CLI 暗色显示);不进答复文本。
+  onThinkingDelta?: (text: string) => void;
+  // 扩展思考的每-Agent 覆盖:省略=跟随 LLM 实例默认(env);false=强制关(子 agent 关思考用)。
+  thinking?: boolean;
   // 可选事件回调，便于 CLI 展示「正在调用工具 / 工具结果」等过程。
   onToolCall?: (call: { name: string; input: Record<string, unknown> }) => void;
   onToolResult?: (result: {
@@ -115,6 +119,8 @@ export class Agent {
   private maxContextTokens: number;
   private keepRecentTurns: number;
   private onTextDelta?: AgentOptions["onTextDelta"];
+  private onThinkingDelta?: AgentOptions["onThinkingDelta"];
+  private thinking?: boolean;
   private onToolCall?: AgentOptions["onToolCall"];
   private onToolResult?: AgentOptions["onToolResult"];
   private onCompact?: AgentOptions["onCompact"];
@@ -142,6 +148,8 @@ export class Agent {
     this.maxContextTokens = opts.maxContextTokens ?? 100000;
     this.keepRecentTurns = opts.keepRecentTurns ?? 2;
     this.onTextDelta = opts.onTextDelta;
+    this.onThinkingDelta = opts.onThinkingDelta;
+    this.thinking = opts.thinking;
     this.onToolCall = opts.onToolCall;
     this.onToolResult = opts.onToolResult;
     this.onCompact = opts.onCompact;
@@ -215,6 +223,8 @@ export class Agent {
           system: this.effectiveSystem(),
           tools: this.tools,
           signal,
+          thinking: this.thinking, // 省略=跟随 LLM env;子 agent 关思考时为 false
+          onThinkingDelta: this.onThinkingDelta,
         });
         let chunk = await it.next();
         while (!chunk.done) {
@@ -433,7 +443,7 @@ export class Agent {
             transcript,
         },
       ],
-      { system: SUMMARY_SYSTEM, signal },
+      { system: SUMMARY_SYSTEM, signal, thinking: false }, // 摘要是工具调用,不思考(省 token)
     );
     let text = "";
     let step = await it.next();

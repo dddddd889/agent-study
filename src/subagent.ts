@@ -139,6 +139,8 @@ async function runSubagent(
     tools,
     maxSteps: deps.maxSteps ?? role.maxSteps ?? SUBAGENT_MAX_STEPS, // 预算隔离
     mode: deps.getMode?.(), // 继承主 agent 当前权限模式(plan 下子 agent 也只读)
+    // 扩展思考(第27步):子 agent 默认继承(跟随 env);AGENT_SUBAGENT_THINKING=0 强制关(并行省钱)。
+    thinking: process.env.AGENT_SUBAGENT_THINKING === "0" ? false : undefined,
     onApprove, // 审批透传:主/子共享
     onTurnComplete: (added) => appendSubagentMessages(mainId, id, added), // 存档
     onToolCall: (c) => {

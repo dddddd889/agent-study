@@ -92,6 +92,8 @@ const res = step.value;            // done 时的 value = 组装好的 LLMRespon
 
 `FakeLLM` 也改成实现 `stream()`(把最终文本作为一段增量 yield、再 return `LLMResponse`),所以现有 agent 测试经它继续覆盖。
 
+> 📎 想深入 SSE 的**全部事件类型 / 内容块类型 / 增量(delta)类型**（含工具参数为何累积后才 parse、思考块与签名、`error` 事件的已知缺口）——见参考文档 [streaming-sse-events.md](streaming-sse-events.md)。
+
 ## 留下的 TODO
 
 1. **全事件流(`fullStream`)**:对外多 yield 几种事件(工具开始/参数碎片/思考),支持更丰富的 UI

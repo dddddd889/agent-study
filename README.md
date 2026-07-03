@@ -1,6 +1,6 @@
 # agent-study · 第 1 步：最简对话循环
 
-> 📈 **本仓库按步骤演进。** 当前代码已实现到 **第 26 步：http_request 的 SSRF 防护**。步骤文档：
+> 📈 **本仓库按步骤演进。** 当前代码已实现到 **第 27 步：扩展思考（extended thinking）**。步骤文档：
 >
 > - 第 2 步 · 工具调用循环 → [docs/02-tool-calling-loop.md](docs/02-tool-calling-loop.md)
 > - 第 3 步 · 常用内置工具（文件 / HTTP / Shell）→ [docs/03-builtin-tools.md](docs/03-builtin-tools.md)
@@ -27,6 +27,7 @@
 > - 第 24 步 · 权限模式（类别×模式→策略 / default·acceptEdits·plan·yolo / /mode / AGENT_MODE）→ [docs/24-permission-modes.md](docs/24-permission-modes.md)
 > - 第 25 步 · 执行沙箱（shell 进 OS 级沙箱 / Seatbelt·bwrap / 写限cwd·禁网 / fail-closed / 与权限模式正交）→ [docs/25-execution-sandbox.md](docs/25-execution-sandbox.md)
 > - 第 26 步 · http_request 的 SSRF 防护（校验解析后 IP / 私有段黑名单 / 重定向逐跳复校 / 可选白名单 / 超时）→ [docs/26-ssrf-protection.md](docs/26-ssrf-protection.md)
+> - 第 27 步 · 扩展思考（thinking 参数 / 解析思考块 / 历史保真回传 / 暗色流式显示 / 内部调用不思考）→ [docs/27-extended-thinking.md](docs/27-extended-thinking.md)
 >
 > 本文件介绍的是**第 1 步内核**（最简对话循环）——它仍是理解后续步骤的基础。
 
@@ -195,7 +196,7 @@ console.log("RESPONSE", data);
 
 ## 演进进度 & 下一步
 
-从第 1 步内核出发，已经一步步长到了第 26 步。**已完成**（每步一篇 docs，见顶部导航）：
+从第 1 步内核出发，已经一步步长到了第 27 步。**已完成**（每步一篇 docs，见顶部导航）：
 
 - ✅ 第 2 步 · 工具调用循环（从"聊天机器人"变"agent"的关键一步）
 - ✅ 第 3 步 · 内置工具（文件 / HTTP / Shell）
@@ -222,6 +223,7 @@ console.log("RESPONSE", data);
 - ✅ 第 24 步 · 权限模式（类别[read/edit/exec]×模式[default/acceptEdits/plan/yolo]→策略[allow/ask/deny] + /mode 运行时切 + AGENT_MODE + 子 agent 继承 + plan 注入 system；删 dangerous/AGENT_ALLOW_ALL）
 - ✅ 第 25 步 · 执行沙箱（shell 包进 OS 级沙箱：macOS Seatbelt / Linux bwrap，workspace-write[写限cwd·读放开·禁网] + fail-closed + 与权限模式正交[yolo 也框住]；argv spawn 避转义 + realpath 归根）
 - ✅ 第 26 步 · http_request 的 SSRF 防护（校验解析后 IP 的私有/保留段黑名单[IPv4+IPv6+mapped] + 重定向逐跳复校 + 可选白名单防外泄 + 超时/中断合并；DNS 重绑定作已知局限）
+- ✅ 第 27 步 · 扩展思考（thinking 请求参数 + 解析思考块[thinking/redacted] + 历史保真回传[工具轮必需] + onThinkingDelta 暗色流式 + 内部调用/子agent 思考开关；记忆抽取剔除思考块）
 
 **下一步（规划中）**：完整的「能力全景 & 差距地图」见 **[docs/roadmap.md](docs/roadmap.md)**（活文档，含 Hooks / Checkpoint / 指令注入 / 多行输入等全部候选与优先级）。下面是几个近期项：
 

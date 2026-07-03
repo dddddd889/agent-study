@@ -12,6 +12,20 @@ export interface TextBlock {
   text: string;
 }
 
+// 扩展思考块(第27步):模型答复前的推理。thinking=正文,signature=校验签名。
+// 带工具调用的轮里必须【原样含签名】回传,否则 API 拒 → 见 docs/27。
+export interface ThinkingBlock {
+  type: "thinking";
+  thinking: string;
+  signature: string;
+}
+
+// 加密的思考块(安全过滤时返回):内容看不懂,但同样必须原样回传。
+export interface RedactedThinkingBlock {
+  type: "redacted_thinking";
+  data: string;
+}
+
 // 模型请求调用某个工具（出现在 assistant 消息里）。
 export interface ToolUseBlock {
   type: "tool_use";
@@ -28,7 +42,12 @@ export interface ToolResultBlock {
   is_error?: boolean; // 执行出错时置 true，模型会据此调整
 }
 
-export type ContentBlock = TextBlock | ToolUseBlock | ToolResultBlock;
+export type ContentBlock =
+  | TextBlock
+  | ThinkingBlock
+  | RedactedThinkingBlock
+  | ToolUseBlock
+  | ToolResultBlock;
 
 // 一条对话消息：content 可以是简单字符串（纯文本场景），
 // 也可以是内容块数组（涉及工具时）。两种形式 Anthropic API 都接受。
@@ -107,6 +126,11 @@ export interface CompleteOptions {
   tools?: Tool[];
   // 中断信号：abort 后正在进行的 fetch/SSE 流会立即断开。
   signal?: AbortSignal;
+  // 第27步:每调用覆盖是否开扩展思考。省略=跟随 LLM 实例默认(env AGENT_THINKING);
+  // 内部工具调用(摘要/记忆抽取)传 false 关掉,省 token。
+  thinking?: boolean;
+  // 思考正文增量回调(暗色显示);不 yield,避免混进答复文本。
+  onThinkingDelta?: (text: string) => void;
 }
 
 // LLM 抽象接口：给定历史消息（和可选 system / tools），流式产出助手的下一步输出。

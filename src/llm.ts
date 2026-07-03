@@ -60,6 +60,9 @@ export class AnthropicLLM implements LLM {
   // 提示词缓存(第22步):AGENT_CACHE=0 关闭;AGENT_CACHE_TTL=1h 切 1 小时(默认 5 分钟)。
   private cacheEnabled: boolean;
   private cacheTtl?: "1h";
+  // 扩展思考(第27步):AGENT_THINKING=1 开(默认关);AGENT_THINKING_BUDGET 预算(默认 16000,<1024 夹到 1024)。
+  private thinkingEnabled: boolean;
+  private thinkingBudget: number;
 
   constructor(opts: AnthropicLLMOptions = {}) {
     this.authToken = opts.authToken ?? process.env.ECHO_TECH_ANTHROPIC_AUTH_TOKEN;
@@ -93,6 +96,12 @@ export class AnthropicLLM implements LLM {
     this.onRetry = opts.onRetry;
     this.cacheEnabled = process.env.AGENT_CACHE !== "0"; // 默认开
     this.cacheTtl = process.env.AGENT_CACHE_TTL === "1h" ? "1h" : undefined; // 默认 5min
+    this.thinkingEnabled = process.env.AGENT_THINKING === "1"; // 默认关
+    // budget 须 ≥1024(API 要求);非法/未设回退 16000。
+    this.thinkingBudget = Math.max(
+      1024,
+      Number(process.env.AGENT_THINKING_BUDGET) || 16000,
+    );
   }
 
   // 当前缓存断点用的 cache_control(关闭时返回 undefined)。
@@ -120,6 +129,20 @@ export class AnthropicLLM implements LLM {
     const { system, tools } = opts;
     const cc = this.cacheControl();
 
+    // 扩展思考(第27步):opts.thinking 每调用覆盖,省略则跟随实例默认(env)。
+    // 内部工具调用(摘要/记忆)传 false 关掉。开启时校验 budget < max_tokens(思考占其一部分)。
+    const thinkingOn = opts.thinking ?? this.thinkingEnabled;
+    let thinking: { type: "enabled"; budget_tokens: number } | undefined;
+    if (thinkingOn) {
+      if (this.thinkingBudget >= this.maxTokens) {
+        throw new Error(
+          `思考预算 AGENT_THINKING_BUDGET(${this.thinkingBudget}) 必须小于 max_tokens(${this.maxTokens})——` +
+            `思考占 max_tokens 的一部分。请调小预算或用 ANTHROPIC_MAX_TOKENS 调大上限。`,
+        );
+      }
+      thinking = { type: "enabled", budget_tokens: this.thinkingBudget };
+    }
+
     // 断点①:system 末尾。渲染序是 tools→system→messages,一个断点在 system 末尾
     // 会【连带缓存它前面的 tools】。开启缓存时把 system 串数组化以便挂 cache_control。
     const systemField = system
@@ -140,6 +163,7 @@ export class AnthropicLLM implements LLM {
       model: this.model,
       max_tokens: this.maxTokens,
       ...(stream ? { stream: true } : {}),
+      ...(thinking ? { thinking } : {}),
       ...(systemField ? { system: systemField } : {}),
       // 把工具的「说明书」传给模型（run 是本地逻辑，不发给 API）。
       ...(tools && tools.length
@@ -181,6 +205,11 @@ export class AnthropicLLM implements LLM {
           const cb = evt.content_block;
           if (cb.type === "text") {
             blocks[evt.index] = { type: "text", text: cb.text ?? "" };
+          } else if (cb.type === "thinking") {
+            // 扩展思考块(第27步):thinking 正文 + signature 签名(随后由 delta 补齐)。
+            blocks[evt.index] = { type: "thinking", thinking: cb.thinking ?? "", signature: cb.signature ?? "" };
+          } else if (cb.type === "redacted_thinking") {
+            blocks[evt.index] = { type: "redacted_thinking", data: cb.data ?? "" };
           } else if (cb.type === "tool_use") {
             blocks[evt.index] = { type: "tool_use", id: cb.id, name: cb.name, input: {} };
             toolJson[evt.index] = "";
@@ -193,6 +222,14 @@ export class AnthropicLLM implements LLM {
             const b = blocks[evt.index];
             if (b && b.type === "text") b.text += d.text;
             yield d.text; // 只把文本增量吐给上层显示
+          } else if (d.type === "thinking_delta") {
+            // 思考正文增量:累进块 + 走 onThinkingDelta 暗色显示,【不 yield】(不混进答复)。
+            const b = blocks[evt.index];
+            if (b && b.type === "thinking") b.thinking += d.thinking ?? "";
+            opts.onThinkingDelta?.(d.thinking ?? "");
+          } else if (d.type === "signature_delta") {
+            const b = blocks[evt.index];
+            if (b && b.type === "thinking") b.signature += d.signature ?? "";
           } else if (d.type === "input_json_delta") {
             // 工具参数是逐碎片来的 JSON 文本，先累积，等块结束再 parse。
             toolJson[evt.index] = (toolJson[evt.index] ?? "") + (d.partial_json ?? "");

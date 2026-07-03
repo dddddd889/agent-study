@@ -252,6 +252,9 @@ async function main() {
     tools: currentTools(),
     // 模型回复的文本增量，边生成边裸写到终端（不加换行）。
     onTextDelta: (text) => process.stdout.write(text),
+    // 扩展思考(第27步):思考正文以【暗色】流式打印,和答复正文区分;TTY 才上色。
+    onThinkingDelta: (text) =>
+      process.stdout.write(process.stdout.isTTY ? `\x1b[2m${text}\x1b[0m` : text),
     // 把工具调用过程打印出来，方便观察 agent 循环里发生了什么。
     // dispatch_agent 例外：它的启动由 onSubStart 打「派出子 agent ▓<id>」更清晰,这里跳过,
     // 免得再重复一条冗长(含完整 prompt)的通用行,并行时更是徒增交织噪音。

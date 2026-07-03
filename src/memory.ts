@@ -32,8 +32,16 @@ export async function extractMemory(
 ): Promise<string> {
   const transcript = history
     .map((m) => {
+      // 第27步:剔除思考块——它是模型草稿(含被丢弃的假设 + 一大坨签名),
+      // 沉淀进长期记忆是污染 + 烧 token;记忆只该记事实/偏好/决定。
       const text =
-        typeof m.content === "string" ? m.content : JSON.stringify(m.content);
+        typeof m.content === "string"
+          ? m.content
+          : JSON.stringify(
+              m.content.filter(
+                (b) => b.type !== "thinking" && b.type !== "redacted_thinking",
+              ),
+            );
       return `${m.role}: ${text}`;
     })
     .join("\n");
@@ -42,8 +50,10 @@ export async function extractMemory(
     `本次对话：\n${transcript}\n\n` +
     `请输出更新后的【完整】长期记忆(要点列表)。`;
 
+  // 记忆抽取是工具调用,不思考(省 token)。
   const it = llm.stream([{ role: "user", content: prompt }], {
     system: MEMORY_SYSTEM,
+    thinking: false,
   });
   let out = "";
   let step = await it.next();
