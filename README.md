@@ -223,10 +223,11 @@ console.log("RESPONSE", data);
 - ✅ 第 25 步 · 执行沙箱（shell 包进 OS 级沙箱：macOS Seatbelt / Linux bwrap，workspace-write[写限cwd·读放开·禁网] + fail-closed + 与权限模式正交[yolo 也框住]；argv spawn 避转义 + realpath 归根）
 - ✅ 第 26 步 · http_request 的 SSRF 防护（校验解析后 IP 的私有/保留段黑名单[IPv4+IPv6+mapped] + 重定向逐跳复校 + 可选白名单防外泄 + 超时/中断合并；DNS 重绑定作已知局限）
 
-**下一步（规划中）**：
+**下一步（规划中）**：完整的「能力全景 & 差距地图」见 **[docs/roadmap.md](docs/roadmap.md)**（活文档，含 Hooks / Checkpoint / 指令注入 / 多行输入等全部候选与优先级）。下面是几个近期项：
 
-- 🚧 **可配置沙箱策略**：把 workspace-write / read-only / full-access 做成档位（对标 Codex sandbox 模式），与权限模式联动。
-- 🚧 **DNS 重绑定 A 级防护**：把连接钉在已校验 IP 上（需换底层能控 DNS lookup 的 HTTP 客户端）。
+- 🚧 **Hooks**：事件钩子（`PreToolUse`/`PostToolUse`/…），执行前拦截、跑完自动 lint/format。
+- 🚧 **Checkpoint / 回滚**：改动前打快照、`/rewind` 回退，承接安全线「改动可恢复」。
+- 🚧 **可配置沙箱策略**：把 workspace-write / read-only / full-access 做成档位，与权限模式联动。
 
 _基建打磨：_
 
