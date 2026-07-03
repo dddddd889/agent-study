@@ -116,3 +116,23 @@ _Avoid_：权限、许可
 **plan 模式（plan mode）**：
 只读的权限档：改文件/执行命令一律 `deny`；并向 system 注入一行指令，让模型主动产出【方案/计划】而非撞拒绝，需要动手时提示用户切 `acceptEdits`。注意与 plan **角色**（`src/roles.ts` 里的只读规划子 agent 人格）分属不同命名空间，是两回事。
 _Avoid_：规划角色（那是 plan 角色）、只读沙箱
+
+**路径沙箱（path sandbox）**：
+把「按路径操作文件」的工具（read/write/edit/patch/grep/glob）**词法**限制在工作目录（`AGENT_SANDBOX_ROOT`，默认 cwd）内的硬边界。管**我们自己的文件工具**，管不到 shell。
+_Avoid_：执行沙箱（那是下一层）、权限模式
+
+**执行沙箱（execution sandbox）**：
+把 **`shell`** 命令关进**操作系统级**沙箱里跑的硬边界：macOS 用 `sandbox-exec`（Seatbelt），Linux 用 `bwrap`。默认策略 = **workspace-write**（写限工作目录 / 读放开 / 禁网）。与权限模式**正交**：模式决定「要不要问」，执行沙箱决定「放行后怎么跑」——`yolo` 下 shell 仍被它框住。默认开，`AGENT_SANDBOX_EXEC=0` 关、`AGENT_SANDBOX_EXEC_NET=1` 放网。沙箱不可用时 **fail-closed**（拒跑 shell）。
+_Avoid_：路径沙箱、命令白名单（那是被否掉的脆弱替代）
+
+**workspace-write（写限工作区）**：
+执行沙箱的默认策略：文件**写**只能落在工作目录内、文件**读**放开全盘、**网络**默认禁。对标 Codex 的同名档。「读放开 + 禁网」的组合意思是：读得到密钥也发不出去。
+_Avoid_：只读沙箱、全隔离
+
+**SSRF（服务端请求伪造）**：
+诱导跑在特权网络位置的 agent 替攻击者发请求，够到公网够不到的东西（`localhost`、内网网段、云元数据 `169.254.169.254`）或外发本地数据。执行沙箱**禁网**是主要防线（连 socket 都出不去）；`http_request` 自身的 SSRF 防护是另一件事（TODO）。
+_Avoid_：注入（泛指）、越权
+
+**fail-closed（不保则拒）**：
+安全护栏的默认姿态：不能保证安全时**拒绝执行**而非放行。执行沙箱不可用（无 `sandbox-exec`/`bwrap`）→ 禁 shell 并提示，而不是静默裸跑。反义是 fail-open（出问题也照跑）。
+_Avoid_：fail-safe（含义相近但易混）、默认拒绝

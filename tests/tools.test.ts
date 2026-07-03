@@ -11,6 +11,7 @@ import {
 } from "../src/tools";
 
 process.env.AGENT_SANDBOX = "0"; // 本文件测工具行为,临时目录在 cwd 外 → 关沙箱(沙箱另见 sandbox.test.ts)
+process.env.AGENT_SANDBOX_EXEC = "0"; // shell 测的是命令语义,关执行沙箱裸跑(执行沙箱另见 exec-sandbox.test.ts)
 
 describe("文件工具", () => {
   const dir = mkdtempSync(join(tmpdir(), "agent-study-"));

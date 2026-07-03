@@ -1,14 +1,15 @@
-import { exec } from "node:child_process";
+import { execFile } from "node:child_process";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { dirname } from "node:path";
 import { promisify } from "node:util";
+import { execSandboxConfig, execSandboxEnv, wrapCommand } from "./exec-sandbox";
 import { applyPatchTool } from "./patch";
 import { resolveInSandbox } from "./sandbox";
 import { globTool, grepTool } from "./search";
 import { todoWriteTool } from "./todo";
 import type { Tool } from "./types";
 
-const execAsync = promisify(exec);
+const execFileAsync = promisify(execFile);
 
 // 工具结果若太长会瞬间吃光上下文 token，统一截断。
 const MAX_OUTPUT = 10000;
@@ -317,8 +318,8 @@ export const httpRequestTool: Tool = {
 };
 
 // 工具 6：执行 shell 命令。
-// ⚠️ TODO: 这是最危险的工具——可执行任意命令。生产环境必须加沙箱 / 命令白名单 /
-//          人工确认；本学习项目仅做最简实现并加 30s 超时防卡死。
+// 第25步:命令被包进【OS 级执行沙箱】跑(macOS Seatbelt / Linux bwrap):写限工作目录、
+// 禁网(见 src/exec-sandbox.ts、docs/25)。沙箱不可用则 fail-closed(拒跑)。30s 超时 + Ctrl+C 中断保留。
 export const shellTool: Tool = {
   name: "shell",
   description:
@@ -334,15 +335,18 @@ export const shellTool: Tool = {
   },
   async run(input, ctx) {
     const command = String(input.command ?? "");
+    // 包成沙箱 argv(关沙箱→裸命令;不可用→fail-closed 抛错,交 Agent 转 is_error)。
+    const { file, args } = wrapCommand(command, execSandboxConfig(), execSandboxEnv());
     try {
       // signal：用户 Ctrl+C 时 kill 子进程；timeout：命令自身的 30s 上限。
-      const { stdout, stderr } = await execAsync(command, {
+      // 用 execFile + argv(不再拼一个大 shell 串),避开 profile+命令的引号转义地狱。
+      const { stdout, stderr } = await execFileAsync(file, args, {
         timeout: 30_000,
         signal: ctx?.signal,
       });
       return truncate([stdout, stderr].filter(Boolean).join("\n").trim() || "（无输出）");
     } catch (err) {
-      // 非 0 退出 / 超时：把退出码和输出一并返回，交给 Agent 转成 is_error。
+      // 非 0 退出 / 超时 / 沙箱拦截(EPERM)：把退出码和输出一并返回，交给 Agent 转成 is_error。
       const e = err as { code?: number; stdout?: string; stderr?: string; message: string };
       const detail = [e.stdout, e.stderr].filter(Boolean).join("\n").trim();
       throw new Error(`命令失败（退出码 ${e.code ?? "?"}）：${detail || e.message}`);

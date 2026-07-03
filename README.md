@@ -1,6 +1,6 @@
 # agent-study · 第 1 步：最简对话循环
 
-> 📈 **本仓库按步骤演进。** 当前代码已实现到 **第 24 步：权限模式（会话级审批策略）**。步骤文档：
+> 📈 **本仓库按步骤演进。** 当前代码已实现到 **第 25 步：执行沙箱（shell 关进 OS 级沙箱）**。步骤文档：
 >
 > - 第 2 步 · 工具调用循环 → [docs/02-tool-calling-loop.md](docs/02-tool-calling-loop.md)
 > - 第 3 步 · 常用内置工具（文件 / HTTP / Shell）→ [docs/03-builtin-tools.md](docs/03-builtin-tools.md)
@@ -25,6 +25,7 @@
 > - 第 22 步 · 提示词缓存（cache_control 断点 / 前缀命中 / /context 观测命中率）→ [docs/22-prompt-caching.md](docs/22-prompt-caching.md)
 > - 第 23 步 · 路径沙箱（文件工具限制在 cwd / 词法硬边界 / AGENT_SANDBOX[_ROOT]）→ [docs/23-path-sandbox.md](docs/23-path-sandbox.md)
 > - 第 24 步 · 权限模式（类别×模式→策略 / default·acceptEdits·plan·yolo / /mode / AGENT_MODE）→ [docs/24-permission-modes.md](docs/24-permission-modes.md)
+> - 第 25 步 · 执行沙箱（shell 进 OS 级沙箱 / Seatbelt·bwrap / 写限cwd·禁网 / fail-closed / 与权限模式正交）→ [docs/25-execution-sandbox.md](docs/25-execution-sandbox.md)
 >
 > 本文件介绍的是**第 1 步内核**（最简对话循环）——它仍是理解后续步骤的基础。
 
@@ -136,6 +137,8 @@ AI > 你叫小明。      ← 证明它记住了上下文
 
 工具按**权限模式**受控（第 24 步）：`default` 下改文件/执行命令前**人工确认**、只读放行。运行时 `/mode` 切换 `default`/`acceptEdits`（自动改）/`plan`（只读）/`yolo`（全放行）；启动用 `AGENT_MODE=yolo bun run start` 全放行（⚠ 慎用，取代旧的 `AGENT_ALLOW_ALL`，详见 [docs/24](docs/24-permission-modes.md)）。
 
+`shell` 命令还被关进 **OS 级执行沙箱**（第 25 步，默认开）：写限工作目录、禁网（macOS Seatbelt / Linux bwrap）——**与权限模式正交，`yolo` 下 shell 仍被框住**。装依赖等需联网设 `AGENT_SANDBOX_EXEC_NET=1`，彻底裸跑设 `AGENT_SANDBOX_EXEC=0`（详见 [docs/25](docs/25-execution-sandbox.md)）。
+
 ## 调试：先跑测试
 
 测试**完全离线**，不需要 API key，是 debug 的最佳起点：
@@ -189,7 +192,7 @@ console.log("RESPONSE", data);
 
 ## 演进进度 & 下一步
 
-从第 1 步内核出发，已经一步步长到了第 24 步。**已完成**（每步一篇 docs，见顶部导航）：
+从第 1 步内核出发，已经一步步长到了第 25 步。**已完成**（每步一篇 docs，见顶部导航）：
 
 - ✅ 第 2 步 · 工具调用循环（从"聊天机器人"变"agent"的关键一步）
 - ✅ 第 3 步 · 内置工具（文件 / HTTP / Shell）
@@ -214,10 +217,12 @@ console.log("RESPONSE", data);
 - ✅ 第 22 步 · 提示词缓存（buildBody 挂 2 个 cache_control 断点[system末+末条消息] + AGENT_CACHE/AGENT_CACHE_TTL + 抓 usage + /context 主对话 + 每个子 agent 按 id 分列命中率）
 - ✅ 第 23 步 · 路径沙箱（resolveInSandbox 词法归一硬边界，read/write/edit/patch/grep/glob 限制在 cwd + AGENT_SANDBOX[_ROOT]；shell 除外、软链留 TODO）
 - ✅ 第 24 步 · 权限模式（类别[read/edit/exec]×模式[default/acceptEdits/plan/yolo]→策略[allow/ask/deny] + /mode 运行时切 + AGENT_MODE + 子 agent 继承 + plan 注入 system；删 dangerous/AGENT_ALLOW_ALL）
+- ✅ 第 25 步 · 执行沙箱（shell 包进 OS 级沙箱：macOS Seatbelt / Linux bwrap，workspace-write[写限cwd·读放开·禁网] + fail-closed + 与权限模式正交[yolo 也框住]；argv spawn 避转义 + realpath 归根）
 
 **下一步（规划中）**：
 
-- 🚧 **执行沙箱**：收紧 shell（OS 级沙箱 / 命令白名单），补上权限模式里 `yolo`/`allow` 档下 shell 的 OS 层越界（第 24 步只做了审批策略层）。
+- 🚧 **http_request 的 SSRF 防护**：禁 `169.254.169.254`/内网 IP、限协议、超时——补上「shell 之外」agent 自己发请求的外连口子。
+- 🚧 **可配置沙箱策略**：把 workspace-write / read-only / full-access 做成档位（对标 Codex sandbox 模式），与权限模式联动。
 
 _基建打磨：_
 
