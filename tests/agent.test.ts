@@ -769,3 +769,62 @@ describe("Agent 工具调用循环", () => {
     expect(events).toEqual(["call:add", "result:add:2"]);
   });
 });
+
+describe("附件重放（第29步）", () => {
+  const refBlock = {
+    type: "image" as const,
+    ref: "abc123",
+    name: "chart.png",
+    mediaType: "image/png",
+    tokens: 10,
+  };
+
+  test("ref 块重放成 base64；历史仍存 ref", async () => {
+    const llm = new FakeLLM(() => "看到了");
+    const agent = new Agent(llm, {
+      blobResolver: (ref) => (ref === "abc123" ? "QUJD" : null),
+    });
+
+    await agent.send([{ type: "text", text: "看看" }, refBlock]);
+
+    // 发给 LLM 的消息:ref 块已换成 base64 image 块
+    const sent = llm.calls[0]!.messages[0]!.content;
+    expect(Array.isArray(sent)).toBe(true);
+    expect(sent).toEqual([
+      { type: "text", text: "看看" },
+      { type: "image", source: { type: "base64", media_type: "image/png", data: "QUJD" } },
+    ]);
+    // 历史里仍是轻量 ref 块(不含 base64)
+    const hist = agent.getHistory()[0]!.content;
+    expect(hist).toEqual([{ type: "text", text: "看看" }, refBlock]);
+  });
+
+  test("blob 缺失(resolver 返 null) → 优雅降级成文字标记,不发坏块", async () => {
+    const llm = new FakeLLM(() => "ok");
+    const agent = new Agent(llm, { blobResolver: () => null });
+
+    await agent.send([refBlock]);
+
+    const sent = llm.calls[0]!.messages[0]!.content;
+    expect(sent).toEqual([{ type: "text", text: "[图片 chart.png（已删除）]" }]);
+    // 历史仍是 ref 块(删的是 blob 字节,历史 append-only 不改写)
+    expect(agent.getHistory()[0]!.content).toEqual([refBlock]);
+  });
+
+  test("未注入 resolver 时也不把 ref 块原样发给 API", async () => {
+    const llm = new FakeLLM(() => "ok");
+    const agent = new Agent(llm); // 无 blobResolver
+
+    await agent.send([{ type: "document", ref: "z", name: "r.pdf", mediaType: "application/pdf", tokens: 5 }]);
+
+    const sent = llm.calls[0]!.messages[0]!.content as Array<{ type: string }>;
+    expect(sent[0]!.type).toBe("text"); // 降级,而非漏出 ref 块
+  });
+
+  test("纯文本轮不受影响(回归)", async () => {
+    const llm = new FakeLLM();
+    const agent = new Agent(llm, { blobResolver: () => "x" });
+    await agent.send("你好");
+    expect(llm.calls[0]!.messages[0]).toEqual({ role: "user", content: "你好" });
+  });
+});

@@ -42,12 +42,52 @@ export interface ToolResultBlock {
   is_error?: boolean; // 执行出错时置 true，模型会据此调整
 }
 
+// ============ 附件（图片 / PDF）============
+// 用户挂进消息、供模型「看」的本地图片 / PDF（第29步）。见 CONTEXT.md「附件」、docs/adr/0013。
+// 三种块的关系：
+//   · ImageBlock / DocumentBlock —— 照抄 Anthropic API 的 base64 形态，只在【喂 API 前重放】时临时出现。
+//   · AttachmentRefBlock         —— 历史 / JSONL 里的存在形态，只存内容寻址引用,永不内联 base64。
+// 二者顶层 type 都是 "image"|"document"，靠「有没有 ref 字段」区分(见 attachments.ts 的 isAttachmentRef)。
+
+// API 的 base64 来源。字段是【蛇形】(media_type)——因为 llm.ts 原样透传给 Anthropic API,
+// 必须用 API 的线上字段名。本步只用 base64;url / file 来源留 TODO。
+export interface Base64Source {
+  type: "base64";
+  media_type: string; // image/png | image/jpeg | image/gif | image/webp | application/pdf
+  data: string; // base64,无换行
+}
+
+// 图片块（重放后的线上形态）。
+export interface ImageBlock {
+  type: "image";
+  source: Base64Source;
+}
+
+// PDF 块（重放后的线上形态）。与 image 并列——API 对二者处理不同(PDF 服务端拆逐页文本+页图)。
+export interface DocumentBlock {
+  type: "document";
+  source: Base64Source;
+}
+
+// 附件 ref 块：历史与落盘里的存在形态。不含 base64,只存内容寻址引用 + 元信息 + token 估值。
+// mediaType 用【驼峰】(与线上 Base64Source.media_type 区分)——ref 块永不直接发给 API。
+export interface AttachmentRefBlock {
+  type: "image" | "document";
+  ref: string; // 内容哈希(sha256),对应 blob 仓里的文件名
+  name: string; // 原文件名,供文字标记 / 展示
+  mediaType: string; // 以魔数为准
+  tokens: number; // ingest 时算好,供 estimateTokens 直接读,不必回碰 blob
+}
+
 export type ContentBlock =
   | TextBlock
   | ThinkingBlock
   | RedactedThinkingBlock
   | ToolUseBlock
-  | ToolResultBlock;
+  | ToolResultBlock
+  | ImageBlock
+  | DocumentBlock
+  | AttachmentRefBlock;
 
 // 一条对话消息：content 可以是简单字符串（纯文本场景），
 // 也可以是内容块数组（涉及工具时）。两种形式 Anthropic API 都接受。

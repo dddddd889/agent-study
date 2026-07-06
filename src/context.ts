@@ -1,13 +1,20 @@
-import type { Message } from "./types";
+import { attachmentLabel, isAttachmentRef } from "./attachments";
+import type { ContentBlock, Message } from "./types";
 
 // 上下文管理：估算历史的 token 数，并在过长时按「整轮」截断。
 // 全部是纯函数，无副作用，方便离线单测。
 
 // 判断一条消息是否为「真实的用户输入」（一轮对话的起点）。
-// 约定（见 agent.ts）：用户输入以字符串 content 压入；工具结果以
-// ContentBlock[] 压入。所以 role==="user" 且 content 是字符串 = 一轮的起点。
+// user 角色的消息只有两类:真实用户输入,或工具结果回传。区分靠「有没有 tool_result 块」——
+//   · 纯文本输入 → 字符串 content(真实输入)
+//   · 带附件输入 → ContentBlock[](text + ref 块,无 tool_result)——【也是真实输入】(第29步)
+//   · 工具结果   → ContentBlock[](tool_result 块)——不是轮起点
+// 故:user 且【不是 tool_result 消息】= 一轮起点。旧版靠「content 是字符串」判定,会把附件轮
+// 误判成非起点,导致压缩找不到切点/轮数漏计,故改用「排除 tool_result」这个更稳的判据。
 export function isUserInput(m: Message): boolean {
-  return m.role === "user" && typeof m.content === "string";
+  if (m.role !== "user") return false;
+  if (typeof m.content === "string") return true;
+  return !m.content.some((b) => b.type === "tool_result");
 }
 
 // 统计「轮数」（真实用户输入的条数）。
@@ -21,8 +28,46 @@ export function countTurns(messages: Message[]): number {
 // TODO: 精确计数改用 Anthropic 的 count_tokens API（有网络/额度成本）。
 export function estimateTokens(messages: Message[]): number {
   let tokens = 0;
-  for (const m of messages) tokens += estimateText(messageText(m));
+  for (const m of messages) {
+    tokens += estimateText(messageText(m));
+    tokens += attachmentTokens(m); // 附件按 ref 块存好的估值直接计入(不走文本估算)
+  }
   return Math.ceil(tokens);
+}
+
+// 附件 token：ref 块在 ingest 时已按 w×h/750(图)/ 页数×常量(PDF)算好、存进块里(见 attachments.ts),
+// 这里直接累加,不必回碰 blob。messageText 对 ref 块返回 ""(贡献 0),故不会重复计。
+function attachmentTokens(m: Message): number {
+  if (typeof m.content === "string") return 0;
+  return m.content.reduce((sum, b) => sum + (isAttachmentRef(b) ? b.tokens : 0), 0);
+}
+
+// 把历史蒸馏成纯文本,喂给「摘要压缩 / 长期记忆抽取」这类 LLM 子调用。统一两条剔除规则,
+// 收成一处、让两个蒸馏点不漂移(见 ADR-0011 历史保真、docs/adr/0013 附件):
+//   · 剔除思考块——模型草稿(含被丢弃的假设 + 一大坨签名),蒸馏成事实/摘要时纯属污染 + 烧 token。
+//   · 附件 ref 块 → 文字标记 [图片 x.png]——蒸馏器是纯文本调用、看不见图,且绝不该把附件塞进去;
+//     图的语义通常已在近期对话文本里,标记只需标出「曾有图」。
+// 只改蒸馏【输入】的序列化:history 里的思考块 / ref 块一字不动(主循环回放仍原样保真)。
+export function serializeForDistill(messages: Message[]): string {
+  return messages
+    .map((m) => {
+      if (typeof m.content === "string") return `${m.role}: ${m.content}`;
+      const kept: ContentBlock[] = [];
+      const markers: string[] = [];
+      for (const b of m.content) {
+        if (b.type === "thinking" || b.type === "redacted_thinking") continue;
+        if (isAttachmentRef(b)) {
+          markers.push(`[${attachmentLabel(b)} ${b.name}]`);
+          continue;
+        }
+        kept.push(b);
+      }
+      const parts: string[] = [];
+      if (kept.length > 0) parts.push(JSON.stringify(kept));
+      parts.push(...markers);
+      return `${m.role}: ${parts.join(" ")}`;
+    })
+    .join("\n");
 }
 
 function estimateText(s: string): number {

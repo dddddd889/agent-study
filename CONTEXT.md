@@ -214,3 +214,25 @@ _Avoid_：记忆（单说时与记忆游标混）
 **记忆更新器（memory updater）**：
 在后台编排长期记忆更新的有状态对象，收拢单飞去重、空结果不覆盖、退出补跑三条策略于一处（`createMemoryUpdater` → `{schedule, flush}`）。区别于 `extractMemory`（单次抽取的纯 LLM 调用）与 `writeMemory`（落盘写文件）——更新器是把「抽取 → 写 → 记 usage」在后台调度起来的那层。
 _Avoid_：记忆写入器（「写」与 writeMemory 撞）、记忆 agent
+
+### 附件（多模态输入）
+
+**附件（attachment）**：
+用户挂进自己消息、供模型「看」的**本地图片 / PDF**。经 `@路径` 语法进入，是「用户 → 模型」单向通道。区别于工具结果返图（未来的 B 通道）。见 [ADR-0013](docs/adr/0013-attachments-content-addressed-blob-store.md)。
+_Avoid_：文件、上传、多模态（泛指时）
+
+**内容寻址 blob 仓（content-addressed blob store）**：
+`.sessions/<id>/blobs/<sha256>` 下按内容哈希存附件**字节原文**的目录。每会话独占、随删会话一起没、不单独 GC、同图去重。是附件的**长期真相**（不像 base64 用完即弃、不像 ref 块只是引用）。呼应「原始流水唯一真相」：blob 是会话自己的资产、不依赖用户原文件。
+_Avoid_：附件仓、缓存（它不是派生缓存，是真相）、上传目录
+
+**ref 块（attachment ref block）**：
+附件在**历史与 JSONL 里的存在形态**：`{type:"image"|"document", ref:sha256, name, mediaType, tokens}`。**永不内联 base64**——只存内容寻址引用 + 元信息 + token 估值。与之相对的是喂 API 时临时拼出的 base64 `image`/`document` 块。
+_Avoid_：附件块（泛指）、image 块（那是 base64 形态）
+
+**重放（rehydrate）**：
+喂 API 前把 ref 块换成 API 要的 base64 块的动作：agent 遍历要发送的消息，经注入的 `blobResolver` 读 blob → base64 → 拼成 `{type, source:{type:"base64",...}}`，得到临时 **wire 副本**；`this.history` 不动。base64 **用完即弃、不缓存**——寿命 = 一次 LLM 调用。靠注入回调保住「`agent.ts` 不碰 fs、`llm.ts` 纯透传」两条不变量。**缺失优雅降级**：blob 读不到（被删 / 损坏 / 丢失）时 `blobResolver` 返回 `null`，重放换成 text 块 `[图片 x.png（已删除）]`——既是健壮性，也是"删附件"的落地（删 blob 字节、ref 留作**墓碑**，因流水 append-only 不可改写）。
+_Avoid_：解引用、还原、rehydrate（口语可，正式用「重放」）
+
+**附件标记（attachment marker）**：
+蒸馏历史成摘要时，附件块被替换成的**文字占位** `[图片 x.png]` / `[PDF x.pdf]`（与 [[历史保真]] 里 thinking 块被剔除同款）。绝不把 base64 喂给摘要器。冻结后原图不可见（只剩标记）是设计使然的**已知局限**——图的语义通常已在近期对话文本里。
+_Avoid_：占位符、缩略（那是别的）

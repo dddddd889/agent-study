@@ -79,6 +79,14 @@ function subagentDir(mainId: string): string {
   return join(sessionsDir(), mainId, "agents");
 }
 
+// 附件 blob 仓(第29步 / docs/adr/0013):旁挂 <sessionsDir>/<id>/blobs/,与 summary.jsonl、
+// agents/ 同级。内容寻址,一文件一 blob(文件名=sha256)。归会话所有——手动删会话目录时随之一并没
+// (本内核无程序化删会话);不单独 GC。供 CLI 拼给 attachments.ingest / resolveBlob;
+// session 本身不读写 blob(那是 attachments 的事)。
+export function blobDir(id: string): string {
+  return join(sessionsDir(), id, "blobs");
+}
+
 // ── 记忆游标 sidecar(第04步 / docs/28) ──────────────────────────────
 // 旁挂 <sessionsDir>/<id>/summary.jsonl 的【派生缓存】：一行一个冻结块 + cursorAfter。
 // 主流水 <id>.jsonl 才是唯一真相 —— sidecar 可自由重写(合并时)、可整体丢弃(校验不过就重摘),

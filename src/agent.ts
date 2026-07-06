@@ -1,3 +1,4 @@
+import { attachmentLabel, isAttachmentRef, toWireBlock } from "./attachments";
 import { ContextCompactor } from "./compactor";
 import { countTurns, estimateTokens } from "./context";
 import { collectStream, extractText } from "./llm";
@@ -8,6 +9,7 @@ import {
   resolvePolicy,
 } from "./permission";
 import type {
+  ContentBlock,
   LLM,
   Message,
   RestorePlan,
@@ -71,6 +73,10 @@ export interface AgentOptions {
     name: string;
     input: Record<string, unknown>;
   }) => Promise<"once" | "always" | "deny">;
+  // 附件重放(第29步):把历史里的 ref 块换成 base64 时,用它按 ref(sha256)读回 base64。
+  // 由 CLI 注入(= attachments.resolveBlob 绑定会话 blob 目录);blob 缺失返回 null → 优雅降级。
+  // agent 因此【不碰文件系统】,只调注入的函数。见 CONTEXT.md「重放」、docs/adr/0013。
+  blobResolver?: (ref: string) => string | null;
 }
 
 // 把一次调用的用量累加进目标桶(缺省则跳过)。第22步缓存观测用。
@@ -125,6 +131,7 @@ export class Agent {
   private onCompact?: AgentOptions["onCompact"];
   private onTurnComplete?: AgentOptions["onTurnComplete"];
   private onApprove?: AgentOptions["onApprove"];
+  private blobResolver?: AgentOptions["blobResolver"];
   // 当前权限模式（第24步）：会话级审批策略，可运行时用 setMode 切换。
   private mode: PermissionMode;
   // 本会话内「总是允许」的工具名（在 ask 档选了 always 的）。仅在 ask 档生效;deny 无视它。
@@ -166,7 +173,30 @@ export class Agent {
     this.onCompact = opts.onCompact;
     this.onTurnComplete = opts.onTurnComplete;
     this.onApprove = opts.onApprove;
+    this.blobResolver = opts.blobResolver;
     this.mode = opts.mode ?? initialMode();
+  }
+
+  // 附件重放(第29步):喂 API 前把历史里的【ref 块】换成 API 要的 base64 image/document 块,
+  // 得到一份【临时 wire 副本】(this.history 不动)。base64 用完即弃、不缓存(见 CONTEXT.md「重放」)。
+  //   · blob 缺失(blobResolver 返 null,或未注入 resolver)→ 优雅降级成 text 标记「(已删除)」,
+  //     绝不把 ref 块原样发给 API(API 不认 ref)。这既是健壮性,也是「删附件」的落地方式。
+  //   · 无 ref 块的消息原样返回(不复制),常态零开销。
+  private rehydrate(messages: Message[]): Message[] {
+    return messages.map((m) => {
+      if (typeof m.content === "string" || !m.content.some(isAttachmentRef)) {
+        return m;
+      }
+      const content: ContentBlock[] = m.content.map((b) => {
+        if (!isAttachmentRef(b)) return b;
+        const base64 = this.blobResolver?.(b.ref) ?? null;
+        if (base64 === null) {
+          return { type: "text", text: `[${attachmentLabel(b)} ${b.name}（已删除）]` };
+        }
+        return toWireBlock(b, base64);
+      });
+      return { role: m.role, content };
+    });
   }
 
   // 权限模式：运行时切换（/mode 命令）与读取（/mode 展示、子 agent 继承）。
@@ -218,7 +248,7 @@ export class Agent {
   //   - 工具执行中中断 → 给未完成的 tool_use 补一条 is_error 取消结果。
   // 然后把这条(合法的)轮保留进历史 + 触发 onTurnComplete 落盘，再抛出中断错误。
   async send(
-    userInput: string,
+    input: string | ContentBlock[],
     opts: { signal?: AbortSignal } = {},
   ): Promise<string> {
     const { signal } = opts;
@@ -229,7 +259,9 @@ export class Agent {
       this.history.push(m);
       added.push(m);
     };
-    commit({ role: "user", content: userInput });
+    // 传字符串=纯文本轮;传块数组=带附件轮(text 块 + ref 块,由 CLI 拼好)。历史里存 ref 块,
+    // base64 只在下面 rehydrate 时临时拼出。
+    commit({ role: "user", content: input });
 
     // 跟踪当前阶段，供中断封口判断该补什么。
     let partialText = ""; // 流式阶段已流出的文本
@@ -264,7 +296,8 @@ export class Agent {
 
         // 消费流式生成器：yield 是文本增量(实时显示 + 累积供封口)，
         // done 的 value 是组装好的完整 LLMResponse。
-        const it = this.llm.stream(this.history, {
+        // 喂 API 前重放:把历史里的 ref 块换成 base64 块(临时副本,this.history 不动)。
+        const it = this.llm.stream(this.rehydrate(this.history), {
           system: this.effectiveSystem(),
           tools: this.tools,
           signal,

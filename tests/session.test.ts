@@ -60,6 +60,27 @@ describe("session 持久化", () => {
     expect(loadSession(id)).toEqual([...turn1, ...turn2]);
   });
 
+  test("附件 ref 块随 JSONL 往返一致（第29步）", () => {
+    const id = newSessionId();
+    const turn: Message[] = [
+      {
+        role: "user",
+        content: [
+          { type: "text", text: "看看" },
+          {
+            type: "image",
+            ref: "abc123",
+            name: "chart.png",
+            mediaType: "image/png",
+            tokens: 15,
+          },
+        ],
+      },
+    ];
+    appendMessages(id, turn);
+    expect(loadSession(id)).toEqual(turn); // ref 块(无 base64)原样往返
+  });
+
   test("load 不存在的会话返回空", () => {
     expect(loadSession(newSessionId())).toEqual([]);
   });

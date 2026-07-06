@@ -51,6 +51,35 @@ describe("extractMemory（记忆 agent）", () => {
 
     expect(memory).toBe("- 用户叫小明\n- 偏好蓝色");
   });
+
+  test("附件 ref 块蒸馏成文字标记,不泄漏 ref 哈希（第29步）", async () => {
+    let prompt = "";
+    const llm = new FakeLLM((messages, opts) => {
+      if (opts.system?.includes("记忆")) {
+        prompt = messages[0]!.content as string;
+        return "- 用户发过一张图";
+      }
+      return "好的";
+    });
+
+    await extractMemory(
+      llm,
+      [
+        {
+          role: "user",
+          content: [
+            { type: "text", text: "看看这张" },
+            { type: "image", ref: "deadbeefcafe", name: "chart.png", mediaType: "image/png", tokens: 10 },
+          ],
+        },
+        { role: "assistant", content: "收到" },
+      ],
+      "",
+    );
+
+    expect(prompt).toContain("[图片 chart.png]"); // 文字标记
+    expect(prompt).not.toContain("deadbeefcafe"); // 不泄漏 ref 哈希/base64
+  });
 });
 
 // ============ 记忆更新器(单飞 / flush 补跑 / 空值保护 / usage / 吞错自愈)============

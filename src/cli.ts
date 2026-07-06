@@ -1,12 +1,14 @@
-import { existsSync } from "node:fs";
+import { existsSync, statSync } from "node:fs";
 import * as readline from "node:readline";
 import { Agent } from "./agent";
+import { ingest, isAttachmentRef, resolveBlob } from "./attachments";
 import { AnthropicLLM } from "./llm";
 import { createMemoryUpdater, readMemory } from "./memory";
 import { loadMcpTools, type McpServerInfo } from "./mcp";
 import { isPermissionMode, MODE_LABELS, MODE_ORDER } from "./permission";
 import {
   appendMessages,
+  blobDir,
   listSessions,
   listSubagents,
   loadSession,
@@ -21,7 +23,7 @@ import {
 } from "./subagent";
 import { latestTodos, renderTodos } from "./todo";
 import { defaultTools } from "./tools";
-import type { Tool, Usage } from "./types";
+import type { ContentBlock, Tool, Usage } from "./types";
 
 // 子 agent 显示配色(第16步):每个【新出现】的子 agent 按顺序分到下一个调色板颜色,
 // 保证同时出现的多个子 agent 颜色互不相同(超过调色板数量才回卷);同一 id 本会话内恒定同色。
@@ -40,6 +42,38 @@ const colorForId = (id: string): number => {
 // 只给传入的片段上色(就是 ▓<id> 这个身份标记),正文保持默认色。
 const paintSub = (id: string, s: string): string =>
   process.stdout.isTTY ? `\x1b[${colorForId(id)}m${s}\x1b[0m` : s;
+
+// 附件解析(第29步):把用户输入里的 `@路径` 拎成附件块。见 CONTEXT.md「附件」、docs/adr/0013。
+//   · 只有 @后面能解析成【真实存在的文件】才当附件;否则(如 @types、不存在的路径)原样留在文本里。
+//   · 对每个附件调 attachments.ingest 落进【当前会话】的 blob 仓,拿到轻量 ref 块。
+//   · ingest 抛错(不支持类型 / 超限)→ 记进 notes 提示、跳过该附件,不中断输入。
+// 返回:无附件 → 原字符串(纯文本轮,零改动);有附件 → [text块, ref块...](带附件轮)。
+function parseAttachments(
+  text: string,
+  dir: string,
+): { content: string | ContentBlock[]; notes: string[] } {
+  const refs: ContentBlock[] = [];
+  const notes: string[] = [];
+  // 按【成串空白】把整行切成 token:\s=任意空白(空格/制表/换行),+=一个或多个(连续空白只切一刀)。
+  // 行首空白会切出一个开头空串,但空串不以 @ 开头,被下面的 startsWith 天然跳过,无害。
+  for (const token of text.split(/\s+/)) {
+    if (!token.startsWith("@") || token.length < 2) continue;
+    const path = token.slice(1);
+    if (!existsSync(path) || !statSync(path).isFile()) continue; // 非真实文件 → 当普通文字
+    try {
+      const ref = ingest(dir, path);
+      refs.push(ref);
+      notes.push(`  · 已附加 ${ref.name}（${ref.mediaType}，~${ref.tokens} token）`);
+    } catch (err) {
+      notes.push(`  · 跳过 ${path}：${(err as Error).message}`);
+    }
+  }
+  if (refs.length === 0) return { content: text, notes };
+  const content: ContentBlock[] = [];
+  if (text.trim() !== "") content.push({ type: "text", text });
+  content.push(...refs);
+  return { content, notes };
+}
 
 // 命令行入口：把 agent 循环包进一个 REPL。
 // 输入 /exit 退出，/reset 清空对话历史。
@@ -283,6 +317,9 @@ async function main() {
       }
     },
     onApprove,
+    // 附件重放(第29步):按 ref 从【当前会话】的 blob 仓读回 base64;缺失返 null → agent 优雅降级。
+    // 读 sessionId 闭包的当前值,故 /new 后自动切到新会话的 blobs 目录。
+    blobResolver: (ref) => resolveBlob(blobDir(sessionId), ref),
   });
 
   // MCP 后台加载:不阻塞 REPL。连好后替换句柄 + setTools + 打印就绪概况。
@@ -395,8 +432,17 @@ async function main() {
       const s = agent.contextStats();
       const frozen =
         s.frozenBlocks > 0 ? ` · 冻结块 ×${s.frozenBlocks} · 游标@${s.cursor}` : "";
+      // 附件计数(第29步):数当前历史里的 ref 块;其 token 已计入上面的 ~token,这里只多报个数。
+      const attachN = agent
+        .getHistory()
+        .reduce(
+          (n, m) =>
+            n + (typeof m.content === "string" ? 0 : m.content.filter(isAttachmentRef).length),
+          0,
+        );
+      const attach = attachN > 0 ? ` · 附件 ×${attachN}` : "";
       console.log(
-        `上下文：~${s.tokens} token · ${s.messages} 条消息 · ${s.turns} 轮 · 含摘要 ${s.hasSummary ? "✓" : "✗"}${frozen} · 软上限 ${s.maxContextTokens}`,
+        `上下文：~${s.tokens} token · ${s.messages} 条消息 · ${s.turns} 轮 · 含摘要 ${s.hasSummary ? "✓" : "✗"}${frozen}${attach} · 软上限 ${s.maxContextTokens}`,
       );
       // 提示词缓存(第22步):本会话累计用量,主 agent 与子 agent 分开显示。数值单位=token。
       const state = process.env.AGENT_CACHE === "0"
@@ -476,10 +522,14 @@ async function main() {
     }
     if (text === "") continue;
 
+    // 附件:把输入里的 @路径 拎成 ref 块落进会话 blob 仓;无附件则原样是字符串。
+    const { content: sendContent, notes } = parseAttachments(text, blobDir(sessionId));
+    for (const n of notes) console.log(n);
+
     currentAbort = new AbortController();
     try {
       process.stdout.write("\nAI > ");
-      const reply = await agent.send(text, { signal: currentAbort.signal });
+      const reply = await agent.send(sendContent, { signal: currentAbort.signal });
       process.stdout.write("\n");
       if (reply.trim() === "") {
         console.log("(本轮无文本输出，可能是工具失败后模型未给结论)");

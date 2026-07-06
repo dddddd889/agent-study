@@ -1,6 +1,7 @@
 import {
   countTurns,
   estimateTokens,
+  serializeForDistill,
   splitForCompaction,
   truncateHistory,
 } from "./context";
@@ -54,25 +55,9 @@ export interface CompactorOptions {
   mergeZoneRatio?: number;
 }
 
-// 把一段消息序列化成「role: text」文本,喂给摘要/合并那次 LLM 调用。
-// 剔除思考块:草稿 + 一大坨签名,喂进摘要器纯烧 token + 添噪(同长期记忆的理由,见 ADR-0011)。
-// 摘要要的是状态/结论(text/tool_use/tool_result),不是推演过程;且不影响思考保真——
-// 只改摘要输入的序列化,history 里真实思考块一字不动。
-function serializeForSummary(messages: Message[]): string {
-  return messages
-    .map((m) => {
-      const text =
-        typeof m.content === "string"
-          ? m.content
-          : JSON.stringify(
-              m.content.filter(
-                (b) => b.type !== "thinking" && b.type !== "redacted_thinking",
-              ),
-            );
-      return `${m.role}: ${text}`;
-    })
-    .join("\n");
-}
+// 摘要/合并那次 LLM 调用的输入序列化 = 通用蒸馏(剔思考 + 附件转文字标记),与长期记忆抽取共用
+// context.serializeForDistill(收口一处避免漂移)。摘要要的是状态/结论,不是推演过程;不影响思考保真。
+const serializeForSummary = serializeForDistill;
 
 // 上下文压缩器(见 docs/28、ADR-0012)：把「历史太长了帮我压一下」这件事收成深模块。
 // 窄接口 compact() 藏三策略(增量冻结 / 合并 / 截断兜底)+ 游标数学。无状态:Agent 持 history

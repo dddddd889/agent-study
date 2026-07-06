@@ -163,4 +163,32 @@ describe("ContextCompactor 压缩器", () => {
     expect(r.event?.strategy).toBe("freeze");
     expect(total).toBe(8); // 一次增量冻结 = 一次摘要调用的用量
   });
+
+  test("蒸馏把附件 ref 块转成文字标记,不泄漏 ref 哈希（第29步）", async () => {
+    let summaryPrompt = "";
+    const llm = new FakeLLM((m, opts) => {
+      if (opts.system?.includes("摘要")) {
+        summaryPrompt = m[0]!.content as string;
+        return "摘要#1";
+      }
+      return { stopReason: "end_turn", content: [{ type: "text", text: "好的" }] };
+    });
+    const c = make(llm);
+    const h: Message[] = [
+      {
+        role: "user",
+        content: [
+          { type: "text", text: "看看这张图占位占位占位占位" },
+          { type: "image", ref: "deadbeefcafe", name: "chart.png", mediaType: "image/png", tokens: 50 },
+        ],
+      },
+      { role: "assistant", content: "这是趋势图占位占位占位占位" },
+      { role: "user", content: "第二句用来把上下文撑长占位占位占位" },
+      { role: "assistant", content: "第二句回复占位占位占位占位" },
+    ];
+    await c.compact(h, EMPTY); // 首轮(含图)落入被摘要的 old 段
+
+    expect(summaryPrompt).toContain("[图片 chart.png]"); // 文字标记
+    expect(summaryPrompt).not.toContain("deadbeefcafe"); // 不泄漏 ref 哈希/base64
+  });
 });

@@ -2,10 +2,39 @@ import { describe, expect, test } from "bun:test";
 import {
   countTurns,
   estimateTokens,
+  isUserInput,
   splitForCompaction,
   truncateHistory,
 } from "../src/context";
 import type { Message } from "../src/types";
+
+describe("isUserInput（轮起点判定）", () => {
+  test("字符串用户输入 = 起点", () => {
+    expect(isUserInput({ role: "user", content: "hi" })).toBe(true);
+  });
+  test("带附件的用户输入(text+ref, 无 tool_result) = 起点（第29步）", () => {
+    expect(
+      isUserInput({
+        role: "user",
+        content: [
+          { type: "text", text: "看看" },
+          { type: "image", ref: "a", name: "x.png", mediaType: "image/png", tokens: 10 },
+        ],
+      }),
+    ).toBe(true);
+  });
+  test("工具结果消息 ≠ 起点", () => {
+    expect(
+      isUserInput({
+        role: "user",
+        content: [{ type: "tool_result", tool_use_id: "t", content: "ok" }],
+      }),
+    ).toBe(false);
+  });
+  test("assistant 永远不是起点", () => {
+    expect(isUserInput({ role: "assistant", content: "hi" })).toBe(false);
+  });
+});
 
 describe("estimateTokens", () => {
   test("空历史为 0", () => {
@@ -32,6 +61,21 @@ describe("estimateTokens", () => {
       },
     ];
     expect(estimateTokens(msgs)).toBeGreaterThan(0);
+  });
+
+  test("附件 ref 块按存好的 tokens 计入（第29步）", () => {
+    const withImg: Message[] = [
+      {
+        role: "user",
+        content: [
+          { type: "text", text: "看看" },
+          { type: "image", ref: "a", name: "x.png", mediaType: "image/png", tokens: 900 },
+        ],
+      },
+    ];
+    const textOnly: Message[] = [{ role: "user", content: "看看" }];
+    // 图的 900 token 计入 → 明显高于纯文本
+    expect(estimateTokens(withImg)).toBeGreaterThanOrEqual(estimateTokens(textOnly) + 900);
   });
 });
 

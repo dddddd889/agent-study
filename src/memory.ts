@@ -1,4 +1,5 @@
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import { serializeForDistill } from "./context";
 import { collectStream } from "./llm";
 import type { LLM, Message, Usage } from "./types";
 
@@ -33,21 +34,9 @@ export async function extractMemory(
   history: Message[],
   current: string,
 ): Promise<{ memory: string; usage?: Usage }> {
-  const transcript = history
-    .map((m) => {
-      // 第27步:剔除思考块——它是模型草稿(含被丢弃的假设 + 一大坨签名),
-      // 沉淀进长期记忆是污染 + 烧 token;记忆只该记事实/偏好/决定。
-      const text =
-        typeof m.content === "string"
-          ? m.content
-          : JSON.stringify(
-              m.content.filter(
-                (b) => b.type !== "thinking" && b.type !== "redacted_thinking",
-              ),
-            );
-      return `${m.role}: ${text}`;
-    })
-    .join("\n");
+  // 蒸馏成文本喂给抽取:剔除思考块(草稿+签名,沉淀进记忆是污染+烧 token)、附件 ref 块转文字标记
+  // (记忆是纯文本、看不见图,第29步)。与摘要压缩共用同一套规则,见 context.serializeForDistill。
+  const transcript = serializeForDistill(history);
   const prompt =
     `已有长期记忆：\n${current || "(空)"}\n\n` +
     `本次对话：\n${transcript}\n\n` +
