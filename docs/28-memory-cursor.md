@@ -17,7 +17,7 @@
 
 ## 三种压缩行为
 
-超软目标 `maxContextTokens` 时（[agent.ts](../src/agent.ts) `compactHistory`）：
+超软目标 `maxContextTokens` 时（[compactor.ts](../src/compactor.ts) `ContextCompactor.compact`，由 [agent.ts](../src/agent.ts) 每轮调模型前调用）：
 
 1. **增量冻结（常态）**：只把中间段摘成**一个新块**追加到冻结区，游标右移，已冻结块一字不动。生成时把冻结区作**只读上下文**喂入帮助解引用 —— **看≠改写**，退化链不接上。
 2. **合并（低频）**：冻结块数 ≥ `mergeBlockThreshold`（默认 5）**或** 冻结区估算 token ≥ `maxContextTokens × mergeZoneRatio`（默认 0.25）时，把**全部**冻结块重摘塌成一块、计数归零。用可控的低频退化，换冻结区不无限膨胀。
@@ -51,7 +51,8 @@
 ## 测试（`bun test`）
 
 - [tests/context.test.ts](../tests/context.test.ts)：带 `frozenCount` 偏移的切分（冻结区被跳过）、截断（冻结区永不丢）。
-- [tests/agent.test.ts](../tests/agent.test.ts)：冻结块跨压缩逐字不变（退化链断开）、只读上下文喂入但只输出新块、到阈值触发合并、失败兜底不丢冻结块、`contextStats` 块数/游标、`frozenState`→`loadHistoryWithFrozen` 续聊重建。
+- [tests/compactor.test.ts](../tests/compactor.test.ts)：直接喂历史给 `ContextCompactor.compact`——冻结块跨压缩逐字不变（退化链断开）、只读上下文喂入但只输出新块、到阈值触发合并、失败兜底不丢冻结块、游标推进、`onUsage` 回流。剥离后压缩单测不再需要立完整 Agent。
+- [tests/agent.test.ts](../tests/agent.test.ts)：端到端——`send` 触发压缩后 `contextStats` 块数/游标、`hasSummary`、`frozenState`→`loadHistoryWithFrozen` 续聊重建、`onCompact` 事件透出。
 - [tests/session.test.ts](../tests/session.test.ts)：sidecar 读写往返、合并式重写行数变少、空冻结区删文件、损坏内容回退 null。
 
 ## 留下的 TODO

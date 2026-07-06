@@ -1,9 +1,5 @@
-import {
-  countTurns,
-  estimateTokens,
-  splitForCompaction,
-  truncateHistory,
-} from "./context";
+import { ContextCompactor } from "./compactor";
+import { countTurns, estimateTokens } from "./context";
 import { collectStream, extractText } from "./llm";
 import {
   initialMode,
@@ -20,11 +16,6 @@ import type {
   ToolUseBlock,
   Usage,
 } from "./types";
-
-// 摘要消息的标记前缀(置顶 user 消息),也用于 contextStats 判断「是否含摘要」。
-export const SUMMARY_PREFIX = "[对话摘要]";
-// 摘要那次 LLM 调用的 system 提示(测试也据 "摘要" 关键字识别这次调用)。
-const SUMMARY_SYSTEM = "你是对话摘要器，只输出摘要正文，不要寒暄或任何前后缀。";
 
 export interface AgentOptions {
   system?: string;
@@ -82,26 +73,6 @@ export interface AgentOptions {
   }) => Promise<"once" | "always" | "deny">;
 }
 
-// 把一段消息序列化成「role: text」文本,喂给摘要/合并那次 LLM 调用。
-function serializeForSummary(messages: Message[]): string {
-  return messages
-    .map((m) => {
-      // 剔除思考块:草稿 + 一大坨签名,喂进摘要器纯烧 token + 添噪(同长期记忆的理由,
-      // 见 ADR-0011)。摘要要的是状态/结论(text/tool_use/tool_result),不是推演过程;
-      // 且不影响思考保真——只改摘要输入的序列化,history 里真实思考块一字不动。
-      const text =
-        typeof m.content === "string"
-          ? m.content
-          : JSON.stringify(
-              m.content.filter(
-                (b) => b.type !== "thinking" && b.type !== "redacted_thinking",
-              ),
-            );
-      return `${m.role}: ${text}`;
-    })
-    .join("\n");
-}
-
 // 把一次调用的用量累加进目标桶(缺省则跳过)。第22步缓存观测用。
 function addUsageInto(dst: Usage, src?: Usage): void {
   if (!src) return;
@@ -143,10 +114,9 @@ export class Agent {
   private tools: Tool[];
   private maxSteps: number;
   private maxConcurrency: number;
-  private maxContextTokens: number;
-  private keepRecentTurns: number;
-  private mergeBlockThreshold: number;
-  private mergeZoneRatio: number;
+  // 上下文压缩器(见 docs/28、ADR-0012)：Agent 的私有协作者,藏三策略 + 游标数学。
+  // 无状态——Agent 持 history/frozenCount/frozenCursors,压缩时传进传出。
+  private compactor: ContextCompactor;
   private onTextDelta?: AgentOptions["onTextDelta"];
   private onThinkingDelta?: AgentOptions["onThinkingDelta"];
   private thinking?: boolean;
@@ -179,12 +149,15 @@ export class Agent {
     this.maxSteps = opts.maxSteps ?? 10;
     this.maxConcurrency =
       opts.maxConcurrency ?? (Number(process.env.AGENT_MAX_CONCURRENCY) || 5);
-    this.maxContextTokens = opts.maxContextTokens ?? 100000;
-    this.keepRecentTurns = opts.keepRecentTurns ?? 2;
-    this.mergeBlockThreshold =
-      opts.mergeBlockThreshold ?? (Number(process.env.AGENT_MERGE_BLOCKS) || 5);
-    this.mergeZoneRatio =
-      opts.mergeZoneRatio ?? (Number(process.env.AGENT_MERGE_ZONE_RATIO) || 0.25);
+    // 压缩配置(四旋钮)透传给私有压缩器;onUsage 把摘要那次调用的用量回流主桶。
+    this.compactor = new ContextCompactor({
+      llm,
+      onUsage: (u) => this.recordMainUsage(u),
+      maxContextTokens: opts.maxContextTokens,
+      keepRecentTurns: opts.keepRecentTurns,
+      mergeBlockThreshold: opts.mergeBlockThreshold,
+      mergeZoneRatio: opts.mergeZoneRatio,
+    });
     this.onTextDelta = opts.onTextDelta;
     this.onThinkingDelta = opts.onThinkingDelta;
     this.thinking = opts.thinking;
@@ -276,8 +249,17 @@ export class Agent {
         pendingToolUses = null;
         pendingResults = [];
 
-        // 调模型前先做上下文管理：历史过长就摘要压缩最旧的对话。
-        await this.compactHistory(signal);
+        // 调模型前先做上下文管理：历史过长就摘要压缩最旧的对话(交私有压缩器)。
+        // 压缩器无状态:算出新历史 + 新冻结状态经返回值交回,Agent 写回并发 onCompact。
+        const r = await this.compactor.compact(
+          this.history,
+          { frozenCount: this.frozenCount, frozenCursors: this.frozenCursors },
+          signal,
+        );
+        this.history = r.history;
+        this.frozenCount = r.frozen.frozenCount;
+        this.frozenCursors = r.frozen.frozenCursors;
+        if (r.event) this.onCompact?.(r.event);
         signal?.throwIfAborted();
 
         // 消费流式生成器：yield 是文本增量(实时显示 + 累积供封口)，
@@ -437,15 +419,11 @@ export class Agent {
       tokens: estimateTokens(this.history),
       messages: this.history.length,
       turns: countTurns(this.history),
-      hasSummary: this.history.some(
-        (m) =>
-          m.role === "user" &&
-          typeof m.content === "string" &&
-          m.content.startsWith(SUMMARY_PREFIX),
-      ),
+      // 冻结模型下每个冻结块都带 [对话摘要] 前缀,故「含摘要」恒等于「有冻结块」。
+      hasSummary: this.frozenCount > 0,
       frozenBlocks: this.frozenCount, // 记忆游标(docs/28)：当前冻结块数
       cursor: this.cursorPos, // 已折进冻结块的原始消息数
-      maxContextTokens: this.maxContextTokens,
+      maxContextTokens: this.compactor.maxContextTokens,
       usage: {
         main: { ...this.usageMain },
         // Map 保持插入序 → 按「派出先后」列出每个子 agent。
@@ -454,136 +432,10 @@ export class Agent {
     };
   }
 
-  // 上下文管理：历史估算 token 超过软目标 maxContextTokens 时，按「记忆游标」压缩(见 docs/28)。
-  // 三段结构：[冻结块 s1..sn] | [已老化未摘的轮] | [最近 keepRecentTurns 轮逐字]。
-  //   · 增量冻结(常态)：只把中间段摘成【一个新块】追加到摘要区,游标右移,已冻结块一字不动;
-  //     生成时把摘要区作【只读上下文】喂入保连贯(看≠改写,不接上「摘要的摘要」的退化链)。
-  //   · 合并(低频)：冻结块数或摘要区占比到阈值 → 把全部冻结块重摘塌成一块、计数归零。
-  //   · 兜底：增量摘要失败 → 只截 frozenCount 之后的逐字轮,冻结块不动。
-  // 是一次性、尽力而为:压不到软目标也不反复摘、不报错,按现状继续。
-  // 注意:摘要只活在内存(磁盘留完整流水,见 docs/09);落盘缓存见第04步。
-  private async compactHistory(signal?: AbortSignal): Promise<void> {
-    const beforeTokens = estimateTokens(this.history);
-    if (beforeTokens <= this.maxContextTokens) return;
-
-    const frozen = this.history.slice(0, this.frozenCount);
-    const { old, recent } = splitForCompaction(
-      this.history,
-      this.keepRecentTurns,
-      this.frozenCount,
-    );
-    if (old.length === 0) return; // 冻结区之后没有可摘的旧轮,尽力而为,按现状继续
-
-    let next: Message[];
-    let strategy: "freeze" | "merge" | "truncate";
-    let droppedTurns = 0;
-    let mergedBlocks: number | undefined;
-    // 只在整段成功构建后才提交游标/frozenCount,避免合并失败留下半更新的状态。
-    let nextFrozenCount = this.frozenCount;
-    let nextCursors = this.frozenCursors;
-    try {
-      // 增量冻结：中间段摘成一个新块,摘要区作只读上下文喂入。
-      const block = await this.summarize(old, signal, frozen);
-      let blocks: Message[] = [
-        ...frozen,
-        { role: "user", content: `${SUMMARY_PREFIX}\n${block}` },
-      ];
-      // 新块的 cursorAfter = 上一块的 + 本次折进的原始消息数。
-      let cursors = [...this.frozenCursors, this.cursorPos + old.length];
-      droppedTurns = countTurns(old);
-
-      // 合并判定：块数或摘要区占比到阈值 → 全部冻结块塌成一块(游标不变)。
-      if (this.shouldMerge(blocks)) {
-        mergedBlocks = blocks.length;
-        const merged = await this.mergeFrozen(blocks, signal);
-        blocks = [{ role: "user", content: `${SUMMARY_PREFIX}\n${merged}` }];
-        cursors = [cursors[cursors.length - 1]!]; // 单块覆盖全部已折原始消息
-        strategy = "merge";
-      } else {
-        strategy = "freeze";
-      }
-      next = [...blocks, ...recent];
-      nextFrozenCount = blocks.length;
-      nextCursors = cursors;
-    } catch (err) {
-      if (signal?.aborted) throw err; // 用户中断 => 交给 send 封口，不当作摘要失败
-      // 摘要/合并失败(网络等)=> 只截 frozenCount 之后的逐字轮,冻结块一字不动。
-      next = truncateHistory(this.history, this.maxContextTokens, this.frozenCount);
-      strategy = "truncate";
-      droppedTurns = countTurns(this.history) - countTurns(next);
-      // nextFrozenCount / nextCursors 不变(截断保留整个冻结区)
-    }
-
-    this.history = next;
-    this.frozenCount = nextFrozenCount;
-    this.frozenCursors = nextCursors;
-    this.onCompact?.({
-      strategy,
-      droppedTurns,
-      mergedBlocks,
-      frozenBlocks: this.frozenCount,
-      cursor: this.cursorPos,
-      beforeTokens,
-      afterTokens: estimateTokens(next),
-    });
-  }
-
   // 当前记忆游标：已折进冻结块的原始消息累计数(= 末块的 cursorAfter,无冻结块则 0)。
+  // 供 contextStats 观测;压缩本身在 ContextCompactor 内自持游标数学(见 src/compactor.ts)。
   private get cursorPos(): number {
     return this.frozenCursors[this.frozenCursors.length - 1] ?? 0;
-  }
-
-  // 合并触发判定：冻结块数到阈值 或 摘要区估算 token 到 maxContextTokens 的占比。
-  private shouldMerge(frozenBlocks: Message[]): boolean {
-    if (frozenBlocks.length >= this.mergeBlockThreshold) return true;
-    return estimateTokens(frozenBlocks) >= this.maxContextTokens * this.mergeZoneRatio;
-  }
-
-  // 把一段旧消息调一次 LLM 浓缩成摘要文本(无工具、聚焦提示、drain 取文本)。
-  // context：已有冻结块,作【只读上下文】喂入帮助解引用 —— 只参考、不复述、不改写(Q3)。
-  private async summarize(
-    messages: Message[],
-    signal?: AbortSignal,
-    context: Message[] = [],
-  ): Promise<string> {
-    let prompt =
-      "请把下面这段对话浓缩成简洁摘要，保留关键事实、用户偏好、已做的决定和未完成事项，省略寒暄。只输出摘要正文：\n\n" +
-      serializeForSummary(messages);
-    if (context.length > 0) {
-      prompt =
-        "【已有摘要（只读上下文，帮助你理解下文的指代；不要复述、不要改写它）】：\n" +
-        serializeForSummary(context) +
-        "\n\n" +
-        prompt;
-    }
-    return this.runSummaryCall(prompt, signal);
-  }
-
-  // 合并：把多个冻结块重摘成一段连贯、去重的摘要(低频事件)。
-  private async mergeFrozen(
-    blocks: Message[],
-    signal?: AbortSignal,
-  ): Promise<string> {
-    const prompt =
-      "请把下面这几段对话摘要合并成一段连贯、去重的摘要，保留全部关键事实、用户偏好、已做的决定和未完成事项。只输出合并后的摘要正文：\n\n" +
-      serializeForSummary(blocks);
-    return this.runSummaryCall(prompt, signal);
-  }
-
-  // 摘要/合并共用的那次 LLM 调用（无工具、聚焦 system、drain 取文本、计入主桶）。
-  private async runSummaryCall(
-    prompt: string,
-    signal?: AbortSignal,
-  ): Promise<string> {
-    const it = this.llm.stream([{ role: "user", content: prompt }], {
-      system: SUMMARY_SYSTEM,
-      signal,
-      thinking: false, // 摘要是工具调用,不思考(省 token)
-      onUsage: (u) => this.recordMainUsage(u), // 中断兜底:同主循环
-    });
-    const { text, response } = await collectStream(it); // 静默收(含空流兜底)
-    this.recordMainUsage(response.usage); // 正常完成:计入本会话
-    return text;
   }
 
   // 安全闸（第24步：权限模式）：判断一个工具调用是否被放行。
