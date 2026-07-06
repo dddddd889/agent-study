@@ -1,6 +1,5 @@
 import { randomUUID } from "node:crypto";
 import {
-  appendFileSync,
   existsSync,
   mkdirSync,
   readdirSync,
@@ -11,6 +10,7 @@ import {
 } from "node:fs";
 import { join } from "node:path";
 import { isUserInput } from "./context";
+import { decodeJsonl, encodeJsonl, jsonlLog } from "./jsonl";
 import type { Message, RestorePlan, RestoreReason } from "./types";
 
 // 会话持久化：每个会话一个 JSONL 文件（每行一条 Message），append-only。
@@ -33,20 +33,12 @@ export function newSessionId(): string {
 
 // 追加本轮新增的消息（每条一行）。append-only，绝不重写已有内容。
 export function appendMessages(id: string, messages: Message[]): void {
-  if (messages.length === 0) return;
-  mkdirSync(sessionsDir(), { recursive: true });
-  const lines = messages.map((m) => JSON.stringify(m)).join("\n") + "\n";
-  appendFileSync(sessionPath(id), lines, "utf-8");
+  jsonlLog<Message>(sessionPath(id)).append(messages);
 }
 
-// 读取整个会话的历史（逐行 parse）。
+// 读取整个会话的历史。文件不存在返回空；坏行会抛（续聊是唯一真相，宁炸不吞）。
 export function loadSession(id: string): Message[] {
-  const path = sessionPath(id);
-  if (!existsSync(path)) return [];
-  return readFileSync(path, "utf-8")
-    .split("\n")
-    .filter((line) => line.trim() !== "")
-    .map((line) => JSON.parse(line) as Message);
+  return jsonlLog<Message>(sessionPath(id)).readAll();
 }
 
 // 列出已有会话：id、更新时间（文件 mtime）、首条用户消息摘要。按最近更新排序。
@@ -113,17 +105,13 @@ export function writeSummary(
     return;
   }
   mkdirSync(join(sessionsDir(), id), { recursive: true });
-  const lines =
-    blocks
-      .map((text, i) =>
-        JSON.stringify({
-          seq: i + 1,
-          cursorAfter: cursors[i] ?? 0,
-          text,
-        } satisfies FrozenBlockLine),
-      )
-      .join("\n") + "\n";
-  writeFileSync(path, lines, "utf-8");
+  const rows: FrozenBlockLine[] = blocks.map((text, i) => ({
+    seq: i + 1,
+    cursorAfter: cursors[i] ?? 0,
+    text,
+  }));
+  // 派生缓存：整文件重写（非 append），故不走 jsonlLog，只复用行编码。
+  writeFileSync(path, encodeJsonl(rows), "utf-8");
 }
 
 // 读盘 + parse 一层(私有)：区分「无文件(missing)」与「读不动/空(corrupt)」。
@@ -138,12 +126,9 @@ function readSidecar(
   if (!existsSync(path)) return { status: "missing" };
   let rows: FrozenBlockLine[];
   try {
-    rows = readFileSync(path, "utf-8")
-      .split("\n")
-      .filter((l) => l.trim() !== "")
-      .map((l) => JSON.parse(l) as FrozenBlockLine);
+    rows = decodeJsonl<FrozenBlockLine>(readFileSync(path, "utf-8"));
   } catch {
-    return { status: "corrupt" }; // parse 不动 → 坏文件
+    return { status: "corrupt" }; // 坏行 → 坏文件（把 decodeJsonl 的抛翻译成 corrupt）
   }
   // 空冻结区时 writeSummary 会删文件；文件在却空 = 被写坏了。
   if (rows.length === 0) return { status: "corrupt" };
@@ -199,11 +184,8 @@ export function appendSubagentMessages(
   id: string,
   messages: Message[],
 ): void {
-  if (messages.length === 0) return;
-  mkdirSync(subagentDir(mainId), { recursive: true });
   const path = join(subagentDir(mainId), `agent-${id}.jsonl`);
-  const lines = messages.map((m) => JSON.stringify(m)).join("\n") + "\n";
-  appendFileSync(path, lines, "utf-8");
+  jsonlLog<Message>(path).append(messages);
 }
 
 // 列出某主会话派出过的子 agent(给 /agents 观测):短 id、消息数、首条 prompt 摘要。
@@ -222,10 +204,7 @@ export function listSubagents(mainId: string): Array<{
       const mtime = statSync(join(dir, f)).mtimeMs;
       let msgs: Message[] = [];
       try {
-        msgs = readFileSync(join(dir, f), "utf-8")
-          .split("\n")
-          .filter((line) => line.trim() !== "")
-          .map((line) => JSON.parse(line) as Message);
+        msgs = jsonlLog<Message>(join(dir, f)).readAll();
       } catch {
         // 损坏的档案跳过内容,仍列出 id
       }

@@ -1,6 +1,6 @@
 # CLAUDE.md
 
-Claude Code 在本仓库工作时的项目指引。
+Claude Code 在本仓库工作时的项目指引。说中文。
 
 ## Agent skills
 
