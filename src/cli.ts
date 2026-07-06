@@ -2,7 +2,7 @@ import { existsSync } from "node:fs";
 import * as readline from "node:readline";
 import { Agent } from "./agent";
 import { AnthropicLLM } from "./llm";
-import { extractMemory, readMemory, writeMemory } from "./memory";
+import { createMemoryUpdater, readMemory } from "./memory";
 import { loadMcpTools, type McpServerInfo } from "./mcp";
 import { isPermissionMode, MODE_LABELS, MODE_ORDER } from "./permission";
 import {
@@ -307,29 +307,14 @@ async function main() {
       });
   };
 
-  // 长期记忆：每轮后【后台】更新，不阻塞主对话。
-  // 单飞(running 防重叠)+ 吞错(后台失败不影响对话)；退出时 flush。
-  let memoryRunning = false;
-  let lastMemoryRun: Promise<void> = Promise.resolve();
-  const updateMemory = () => {
-    if (memoryRunning) return; // 单飞：一次没跑完不重叠;下次读全量历史会补上
-    memoryRunning = true;
-    lastMemoryRun = (async () => {
-      try {
-        const { memory: next, usage } = await extractMemory(
-          llm,
-          agent.getHistory(),
-          readMemory(),
-        );
-        if (next) writeMemory(next); // 空结果不覆盖,避免清空记忆
-        agent.recordMainUsage(usage); // 后台照样烧 token,计入会话主用量
-      } catch {
-        // 后台失败：静默,不影响主对话
-      } finally {
-        memoryRunning = false;
-      }
-    })();
-  };
+  // 长期记忆：每轮后【后台】更新，不阻塞主对话。单飞/空值保护/退出补跑的策略
+  // 都收在 createMemoryUpdater 里(见 memory.ts、CONTEXT.md「记忆更新器」);
+  // 这里只注入依赖:全量历史快照 + usage 汇出口(后台照样烧 token,计入会话主用量)。
+  const memoryUpdater = createMemoryUpdater(
+    llm,
+    () => agent.getHistory(),
+    (u) => agent.recordMainUsage(u),
+  );
 
   // 续聊：启动带了 sessionId 且磁盘有记录 → 灌进内存接着聊。
   if (process.argv[2]) {
@@ -511,24 +496,12 @@ async function main() {
     }
 
     // 一轮结束：后台更新长期记忆，不 await（不阻塞下一句输入）。
-    updateMemory();
+    memoryUpdater.schedule();
   }
 
-  // 退出前 flush：等在飞的记忆更新，再补跑一次以纳入最后一轮（尽力而为）。
-  await lastMemoryRun;
-  if (agent.getHistory().length > 0) {
-    process.stdout.write("正在保存长期记忆…\n");
-    try {
-      const { memory: next } = await extractMemory(
-        llm,
-        agent.getHistory(),
-        readMemory(),
-      );
-      if (next) writeMemory(next);
-    } catch {
-      // 退出时记忆保存失败：忽略
-    }
-  }
+  // 退出前 flush：等在飞的记忆更新落定，必要时补跑以纳入最后一轮（尽力而为）。
+  process.stdout.write("正在保存长期记忆…\n");
+  await memoryUpdater.flush();
 
   await mcpReady; // 后台首连可能还在飞,先等它落定再关,避免漏关子进程
   await mcp.close(); // 关闭所有 MCP 连接(kill 子进程 / 关会话)

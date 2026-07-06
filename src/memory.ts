@@ -61,3 +61,66 @@ export async function extractMemory(
   const { text, response } = await collectStream(it); // 静默收(含空流兜底)
   return { memory: text.trim(), usage: response.usage };
 }
+
+// 记忆更新器(见 CONTEXT.md「长期记忆」):把长期记忆的后台更新【策略】收拢到一处 ——
+// 单飞去重、空结果不覆盖、退出补跑。CLI 只管在每轮后 schedule()、退出前 flush(),
+// 不再自持 memoryRunning / lastMemoryRun 这些裸状态,也不再重复退出补跑逻辑。
+//
+//   llm        : 抽取用的模型
+//   getHistory : 取当前【全量】工作历史的快照函数(每次运行同步求值一次)
+//   onUsage    : 后台照样烧 token —— 把每次抽取的 usage 报回去计入会话主用量
+//
+// 三个运行时状态都是本闭包私有的 let,进程内、会话级、不落盘:
+//   running : 是否有抽取在飞(单飞闸门)
+//   lastRun : 最近一次抽取的 promise(flush 先等它)
+//   pending : 「有比在飞运行更新的历史没被覆盖」的脏标记(flush 据此决定补跑)
+export function createMemoryUpdater(
+  llm: LLM,
+  getHistory: () => Message[],
+  onUsage: (usage?: Usage) => void,
+): { schedule: () => void; flush: () => Promise<void> } {
+  let running = false;
+  let lastRun: Promise<void> = Promise.resolve();
+  let pending = false;
+
+  // 一次抽取运行:开始即清 pending(这次会覆盖到当前全量历史);
+  // getHistory() 在传参时同步求快照 —— 与 pending=false 同为同步、无竞态。
+  const run = (): Promise<void> => {
+    running = true;
+    pending = false;
+    lastRun = (async () => {
+      try {
+        const { memory: next, usage } = await extractMemory(
+          llm,
+          getHistory(),
+          readMemory(),
+        );
+        if (next) writeMemory(next); // 空结果不覆盖,避免清空记忆
+        onUsage(usage);
+      } catch {
+        // 后台失败:静默,不影响主对话
+      } finally {
+        running = false;
+      }
+    })();
+    return lastRun;
+  };
+
+  // 每轮后调:有在飞的就记脏返回(单飞),否则起一次后台运行(不 await)。
+  const schedule = (): void => {
+    if (running) {
+      pending = true;
+      return;
+    }
+    void run();
+  };
+
+  // 退出前调:先等在飞的落定;若期间有被单飞挡掉的新历史(pending),
+  // 再全量补一次 —— 一次抽取即可把连续挡掉的多轮一起纳入(读的是全量)。
+  const flush = async (): Promise<void> => {
+    await lastRun;
+    if (pending) await run();
+  };
+
+  return { schedule, flush };
+}

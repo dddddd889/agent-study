@@ -4,6 +4,10 @@ Claude Code 在本仓库工作时的项目指引。说中文。
 
 ## Agent skills
 
+### 复杂任务
+
+请多开几个子agent并行开发。
+
 ### Issue 跟踪器
 
 issue 和 PRD 以本地 markdown 形式存放在 `.scratch/<feature-slug>/` 下。详见 `docs/agents/issue-tracker.md`。
