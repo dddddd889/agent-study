@@ -25,6 +25,7 @@ Status: accepted
 
 - **子 agent 不落盘**：sidecar 的功能价值是「续聊省重摘」，子 agent 无「下次」——给它写只写不读的文件是把功能设施降格成日志，还逼着重构 `agents/` 布局。故子 agent 保留内存内游标压缩、不落 sidecar。
 - **合并保留电话传话的一点点**：全塌成一块每次会重摘整个冻结史，但因低频（阈值封顶）被稀释到几乎无害；不做 B 的「保新鲜」簿记 / C 的层次合并（教学内核里过度设计）。
+- **读取侧收成 `restoreFrozen`（后续收口）**：原「读 sidecar（`readSummary`）+ 校验游标 + 重建（`loadHistoryWithFrozen`）」散在 session/cli/agent 三处，校验判断裸露在 CLI 且无测试。收成 `session.ts` 的深模块 `restoreFrozen(prior, id) → {blocks, cursors, rest, reason}`：吸收读盘（`readSummary` 降为私有）、区分 `missing / corrupt / invalid`、返回统一退化方案（回退即空冻结块，CLI 无分支、一律 `loadHistoryWithFrozen(plan)`）。放 `session.ts` 而非做成 Agent 方法，是为守住「Agent 不碰 fs」的既有不变量——故收注入的 `prior`、只碰 sidecar。术语见 CONTEXT.md 的「冻结区重建」。
 
 ## 落地
 

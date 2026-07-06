@@ -709,7 +709,12 @@ describe("Agent 工具调用循环", () => {
     // 新 agent 用 sidecar 状态 + 主流水尾巴重建(模拟续聊)。
     const a2 = new Agent(countingSummarizerLLM());
     const rest: Message[] = [{ role: "user", content: "续聊一句" }];
-    a2.loadHistoryWithFrozen(state.blocks, state.cursors, rest);
+    a2.loadHistoryWithFrozen({
+      blocks: state.blocks,
+      cursors: state.cursors,
+      rest,
+      reason: "frozen",
+    });
 
     const s = a2.contextStats();
     expect(s.frozenBlocks).toBe(state.blocks.length);

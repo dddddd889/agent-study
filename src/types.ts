@@ -56,6 +56,25 @@ export interface Message {
   content: string | ContentBlock[];
 }
 
+// ============ 冻结区重建（restoreFrozen）============
+// 续聊时对「摘要缓存 sidecar」的读取侧结果。见 session.ts 的 restoreFrozen、
+// CONTEXT.md「冻结区重建」、docs/adr/0012。
+//   frozen  : 命中——sidecar 有效且游标对得上主流水,按冻结块 + 游标之后逐字重建
+//   missing : 无 sidecar(没压缩过的新会话)——常态,静默
+//   corrupt : 文件损坏 / 结构不自洽——坏缓存,告警
+//   invalid : 游标对不上主流水(越界或没落在轮边界)——多半是逻辑 bug,告警
+export type RestoreReason = "frozen" | "missing" | "corrupt" | "invalid";
+
+// 「重建方案」：统一退化形状。命中时 blocks/cursors 非空、rest = 主流水游标之后;
+// 任何不命中一律退化成「空冻结块 + rest = 整条主流水」,于是调用方【无需分支】——
+// loadHistoryWithFrozen(plan) 对命中/回退都成立(空 blocks 自然等价于全量恢复)。
+export interface RestorePlan {
+  blocks: string[]; // 冻结块正文(含 [对话摘要] 前缀);回退时为空
+  cursors: number[]; // 各块 cursorAfter;回退时为空
+  rest: Message[]; // 要逐字灌入的主流水尾巴(命中=slice(cursor),回退=整条)
+  reason: RestoreReason;
+}
+
 // ============ 工具定义 ============
 // 工具类别（第24步：权限模式据此决策）：
 //   read : 只读、无副作用（read_file/grep/glob…）

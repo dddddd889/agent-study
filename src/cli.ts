@@ -11,10 +11,9 @@ import {
   listSubagents,
   loadSession,
   newSessionId,
-  readSummary,
+  restoreFrozen,
   writeSummary,
 } from "./session";
-import { isUserInput } from "./context";
 import {
   createCriticTool,
   createDispatchAgentTool,
@@ -336,22 +335,20 @@ async function main() {
   if (process.argv[2]) {
     const prior = loadSession(sessionId);
     if (prior.length) {
-      // 记忆游标 sidecar(docs/28)：校验通过就用冻结块 + 游标之后逐字重建,免全量重摘;
-      // 校验不过/缺失/损坏 → 静默丢缓存,退回读全量(下次压缩重摘)。主流水才是唯一真相。
-      const cache = readSummary(sessionId);
-      const valid =
-        cache !== null &&
-        cache.cursor <= prior.length &&
-        (cache.cursor === prior.length || isUserInput(prior[cache.cursor]!));
-      if (valid) {
-        agent.loadHistoryWithFrozen(cache.blocks, cache.cursors, prior.slice(cache.cursor));
-        console.log(
-          `已恢复会话 ${sessionId}（${prior.length} 条消息 · 冻结块 ×${cache.blocks.length} · 游标@${cache.cursor}，免重摘）`,
+      // 冻结区重建(docs/28、CONTEXT.md)：restoreFrozen 一手包办读 sidecar + 校验游标 + 出方案;
+      // 命中就冻结块 + 游标之后逐字重建、免全量重摘,回退则空冻结块=全量,故此处无需分支。
+      // 坏缓存(损坏/校验不过)照常恢复但告警,缺失属常态、静默。主流水才是唯一真相。
+      const plan = restoreFrozen(prior, sessionId);
+      if (plan.reason === "corrupt" || plan.reason === "invalid") {
+        console.warn(
+          `⚠️ 摘要缓存 ${plan.reason}，本次全量恢复（缓存将于下次压缩重建）`,
         );
-      } else {
-        agent.loadHistory(prior);
-        console.log(`已恢复会话 ${sessionId}（${prior.length} 条消息）`);
       }
+      agent.loadHistoryWithFrozen(plan);
+      const tail = plan.blocks.length
+        ? ` · 冻结块 ×${plan.blocks.length} · 游标@${plan.cursors[plan.cursors.length - 1]}，免重摘`
+        : "";
+      console.log(`已恢复会话 ${sessionId}（${prior.length} 条消息${tail}）`);
     } else {
       console.log(`会话 ${sessionId} 暂无记录，作为新会话开始`);
     }

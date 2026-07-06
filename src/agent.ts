@@ -14,6 +14,7 @@ import {
 import type {
   LLM,
   Message,
+  RestorePlan,
   Tool,
   ToolResultBlock,
   ToolUseBlock,
@@ -219,20 +220,18 @@ export class Agent {
     return { blocks, cursors: [...this.frozenCursors] };
   }
 
-  // 记忆游标续聊(第04步)：用 sidecar 的冻结块 + 游标 + 主流水尾巴重建工作历史。
-  // history = [冻结块...] + rest(主流水 cursor 之后的逐字轮)。调用方负责校验游标合法。
-  loadHistoryWithFrozen(
-    blocks: string[],
-    cursors: number[],
-    rest: Message[],
-  ): void {
-    const frozenMsgs: Message[] = blocks.map((content) => ({
+  // 冻结区重建(第04步)：应用 restoreFrozen 产出的【重建方案】,重建工作历史。
+  // history = [冻结块...] + plan.rest(主流水游标之后的逐字轮)。校验已在 restoreFrozen 内完成;
+  // 方案统一退化(回退时 blocks 为空)故此处对命中/回退都成立 —— 空冻结块即等价全量恢复。
+  // 忽略 plan.reason(那是给 CLI 打日志/告警用的,与状态重建无关)。
+  loadHistoryWithFrozen(plan: RestorePlan): void {
+    const frozenMsgs: Message[] = plan.blocks.map((content) => ({
       role: "user",
       content,
     }));
-    this.history = [...frozenMsgs, ...rest];
+    this.history = [...frozenMsgs, ...plan.rest];
     this.frozenCount = frozenMsgs.length;
-    this.frozenCursors = [...cursors];
+    this.frozenCursors = [...plan.cursors];
   }
 
   // 运行时替换工具集（MCP 热重载用）。

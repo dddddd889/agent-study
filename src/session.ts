@@ -10,7 +10,8 @@ import {
   writeFileSync,
 } from "node:fs";
 import { join } from "node:path";
-import type { Message } from "./types";
+import { isUserInput } from "./context";
+import type { Message, RestorePlan, RestoreReason } from "./types";
 
 // 会话持久化：每个会话一个 JSONL 文件（每行一条 Message），append-only。
 // 磁盘保留「完整流水」，内存里的历史可被 compactHistory 截断 —— 两者有意分离。
@@ -125,24 +126,71 @@ export function writeSummary(
   writeFileSync(path, lines, "utf-8");
 }
 
-// 读回 sidecar：{blocks, cursors, cursor}。文件缺失/损坏 → null(调用方退回全量重摘)。
-export function readSummary(
+// 读盘 + parse 一层(私有)：区分「无文件(missing)」与「读不动/空(corrupt)」。
+// 结构校验与游标校验留给 restoreFrozen —— 读盘只管把行拿回来、认出坏文件。
+function readSidecar(
   id: string,
-): { blocks: string[]; cursors: number[]; cursor: number } | null {
+):
+  | { status: "missing" }
+  | { status: "corrupt" }
+  | { status: "ok"; blocks: string[]; cursors: number[] } {
   const path = summaryPath(id);
-  if (!existsSync(path)) return null;
+  if (!existsSync(path)) return { status: "missing" };
+  let rows: FrozenBlockLine[];
   try {
-    const rows = readFileSync(path, "utf-8")
+    rows = readFileSync(path, "utf-8")
       .split("\n")
       .filter((l) => l.trim() !== "")
       .map((l) => JSON.parse(l) as FrozenBlockLine);
-    if (rows.length === 0) return null;
-    const blocks = rows.map((r) => r.text);
-    const cursors = rows.map((r) => r.cursorAfter);
-    return { blocks, cursors, cursor: cursors[cursors.length - 1] ?? 0 };
   } catch {
-    return null; // 损坏 → 丢缓存,自愈
+    return { status: "corrupt" }; // parse 不动 → 坏文件
   }
+  // 空冻结区时 writeSummary 会删文件；文件在却空 = 被写坏了。
+  if (rows.length === 0) return { status: "corrupt" };
+  return {
+    status: "ok",
+    blocks: rows.map((r) => r.text),
+    cursors: rows.map((r) => r.cursorAfter),
+  };
+}
+
+// 冻结区重建(见 CONTEXT.md「冻结区重建」、docs/adr/0012)：sidecar 的读取侧深模块。
+// 收注入的主流水 prior(Agent 保持 I/O-free,持久化读取归本层),吐一个统一退化的【重建方案】：
+//   · 命中(frozen)：sidecar 有效且游标对得上 prior → {blocks, cursors, prior.slice(cursor)}
+//   · 回退(missing/corrupt/invalid)：一律 {[], [], prior} —— 空冻结块即等价全量恢复
+// 于是调用方无需分支,拿到方案直接 loadHistoryWithFrozen(plan) 即可(命中/回退都成立)。
+// 校验分两层,与 reason 一一对应：
+//   结构不自洽(块数≠游标数/非单调/非法数) → corrupt(文件坏)；
+//   游标对不上主流水(越界或没落在轮边界) → invalid(多半是冻结逻辑 bug)。
+export function restoreFrozen(prior: Message[], id: string): RestorePlan {
+  const full = (reason: RestoreReason): RestorePlan => ({
+    blocks: [],
+    cursors: [],
+    rest: prior,
+    reason,
+  });
+
+  const sc = readSidecar(id);
+  if (sc.status !== "ok") return full(sc.status); // missing / corrupt
+
+  const { blocks, cursors } = sc;
+  // 结构校验 → corrupt：块数=游标数>0、游标为非负整数且严格递增。
+  const structOk =
+    blocks.length > 0 &&
+    blocks.length === cursors.length &&
+    cursors.every(
+      (c, i) => Number.isInteger(c) && c >= 0 && (i === 0 || c > cursors[i - 1]!),
+    );
+  if (!structOk) return full("corrupt");
+
+  // 游标校验 → invalid：末游标在界内,且正好落在主流水的「真实用户输入」边界(或末尾)。
+  const cursor = cursors[cursors.length - 1]!;
+  const cursorOk =
+    cursor <= prior.length &&
+    (cursor === prior.length || isUserInput(prior[cursor]!));
+  if (!cursorOk) return full("invalid");
+
+  return { blocks, cursors, rest: prior.slice(cursor), reason: "frozen" };
 }
 
 // 追加子 agent 本轮消息(每条一行,append-only),自动建目录。
