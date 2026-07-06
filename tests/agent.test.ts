@@ -532,6 +532,42 @@ describe("Agent 工具调用循环", () => {
     expect(agent.contextStats().hasSummary).toBe(true);
   });
 
+  test("压缩摘要输入剔除思考块（不泄露思考正文/signature，但保留 text）", async () => {
+    const llm = summarizerLLM();
+    const agent = new Agent(llm, {
+      maxContextTokens: 30, // 很小，强制压缩
+      keepRecentTurns: 1,
+      mergeBlockThreshold: 100, // 关掉合并,隔离增量冻结
+      mergeZoneRatio: 100,
+    });
+    // 注入含【思考块】的旧轮(模拟真实多步轮:thinking + text + tool_use / tool_result)。
+    agent.loadHistory([
+      { role: "user", content: "第一句很长的话用来把上下文撑长占位占位占位占位" },
+      {
+        role: "assistant",
+        content: [
+          { type: "thinking", thinking: "秘密推理绝不该进摘要", signature: "SIG_BLOB_XYZ" },
+          { type: "text", text: "我来查一下" },
+          { type: "tool_use", id: "t1", name: "noop", input: {} },
+        ],
+      },
+      {
+        role: "user",
+        content: [{ type: "tool_result", tool_use_id: "t1", content: "结果", is_error: false }],
+      },
+      { role: "user", content: "第二句很长的话用来把上下文撑长占位占位占位占位" },
+    ]);
+
+    await agent.send("再来一句把上下文彻底撑爆占位占位占位占位"); // 触发压缩
+
+    const summaryCalls = llm.calls.filter((c) => c.system?.includes("摘要"));
+    expect(summaryCalls.length).toBeGreaterThan(0);
+    const prompt = summaryCalls[0]!.messages[0]!.content as string;
+    expect(prompt).not.toContain("SIG_BLOB_XYZ"); // signature 不泄露
+    expect(prompt).not.toContain("秘密推理绝不该进摘要"); // 思考正文不泄露
+    expect(prompt).toContain("我来查一下"); // 但 text 块保留
+  });
+
   test("摘要调用失败 → 回退整轮截断，触发 onCompact(truncate)", async () => {
     const llm = new FakeLLM((_messages, opts) => {
       if (opts.system?.includes("摘要")) throw new Error("summarize failed");

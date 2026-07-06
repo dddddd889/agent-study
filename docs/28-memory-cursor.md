@@ -25,6 +25,8 @@
 
 > 事务性：游标/`frozenCount` 只在整段 `next` 成功构建后才提交，避免合并失败留下半更新的状态。
 
+**摘要输入剔除思考块**：喂给摘要器的 transcript（`serializeForSummary`）把被摘轮里的 `thinking`/`redacted_thinking` 剔掉 —— 草稿 + 一大坨签名，蒸馏进摘要纯烧 token，且**无信息损失**（结论已在 text/tool_use/tool_result 里）。这只改**摘要输入**，`history` 里真实思考块一字不动 —— 主循环回放仍原样保真（见 [ADR-0011](adr/0011-extended-thinking-fidelity.md)、[CONTEXT.md 历史保真](../CONTEXT.md#扩展思考)）。注意与长期记忆同源同理（都剔除思考、但两者实现各自独立）。
+
 ## 落盘：可丢的 sidecar 缓存
 
 - **文件**：`<sessionsDir>/<id>/summary.jsonl`（与 `agents/` 同级）。一行一个冻结块 `{seq, cursorAfter, text}`，末行 `cursorAfter` 即当前游标。

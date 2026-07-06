@@ -85,8 +85,17 @@ export interface AgentOptions {
 function serializeForSummary(messages: Message[]): string {
   return messages
     .map((m) => {
+      // 剔除思考块:草稿 + 一大坨签名,喂进摘要器纯烧 token + 添噪(同长期记忆的理由,
+      // 见 ADR-0011)。摘要要的是状态/结论(text/tool_use/tool_result),不是推演过程;
+      // 且不影响思考保真——只改摘要输入的序列化,history 里真实思考块一字不动。
       const text =
-        typeof m.content === "string" ? m.content : JSON.stringify(m.content);
+        typeof m.content === "string"
+          ? m.content
+          : JSON.stringify(
+              m.content.filter(
+                (b) => b.type !== "thinking" && b.type !== "redacted_thinking",
+              ),
+            );
       return `${m.role}: ${text}`;
     })
     .join("\n");

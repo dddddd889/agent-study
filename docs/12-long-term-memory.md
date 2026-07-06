@@ -17,8 +17,8 @@
 
 没有让主 agent 调 `remember` 工具(那依赖它"记得调"、还污染主提示),而是用一个**专门的记忆 agent**([memory.ts](../src/memory.ts) 的 `extractMemory`):
 
-- 形态:一个**聚焦的 LLM 调用**(无工具,像 `summarize()`);
-- 输入:**当前 `.memory.md` + 本次对话**;
+- 形态:一个**聚焦的 LLM 调用**(无工具,像 `summarize()`),且 **`thinking: false`**(抽取是工具活,不必思考,省 token);
+- 输入:**当前 `.memory.md` + 本次对话**;转写对话时**剔除思考块**(`thinking` / `redacted_thinking`)—— 那是模型草稿(含被丢弃的假设 + 一大坨签名),沉淀进长期记忆是污染 + 烧 token,记忆只该记事实/偏好/决定(第 27 步引入);
 - system:「提取值得长期记住的事实/偏好/决定,合并进已有记忆,**去重、保持简洁**,输出完整记忆」;
 - 输出:**合并去重后的完整记忆** → 覆盖写 `.memory.md`。
 
@@ -31,6 +31,7 @@
 - **每轮结束后 fire-and-forget**:`updateMemory()` **不 await** —— LLM 调用是网络 I/O,不占事件循环,CLI 立刻回到提示符;
 - **单飞(single-flight)**:一次没跑完不重叠启动;被跳过也没事,记忆 agent 每次读**全量历史**,下次会补上;
 - **吞错**:后台 promise `catch` 掉,记忆失败不影响主对话;**空结果不覆盖**(避免清空记忆);
+- **计入用量**:后台记忆调用照样烧 token —— `extractMemory` 返回这次的 `usage`,CLI 用 `recordMainUsage` 计入会话主用量(不再像以前那样把 usage 丢在地上);
 - **退出 flush**:`/exit` 时 `await` 在飞的 + 补跑一次,纳入最后一轮(`kill` 终端仍可能丢最后一次,best-effort);
 - 记忆 agent **不绑主回合的 abort signal**(它是后台独立任务,中断的是当前回复)。
 
