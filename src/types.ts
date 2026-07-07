@@ -40,6 +40,12 @@ export interface ToolResultBlock {
   tool_use_id: string; // 对应某个 ToolUseBlock.id
   content: string; // 工具返回的文本结果
   is_error?: boolean; // 执行出错时置 true，模型会据此调整
+  // skill 标记(块级):这条 tool_result 是 skill 正文(模型通道)时置为 skill 名。
+  // 用途:长期记忆抽取据此把 skill 正文剔掉(见 context.serializeForDistill 的 dropSkill、
+  // CONTEXT.md「skill 标记」/「三层蒸馏处置」、docs/adr/0014)。块级(而非消息级)是为了在
+  // skill 与其它工具【同轮批量】收进一条 user 消息时,只剔 skill 那一块、不误伤同批别的结果。
+  // 【绝不影响落盘】:JSONL 里 content 原样存,skill 正文进流水(唯一真相)。
+  skillMark?: string;
 }
 
 // ============ 附件（图片 / PDF）============
@@ -94,6 +100,11 @@ export type ContentBlock =
 export interface Message {
   role: Role;
   content: string | ContentBlock[];
+  // skill 标记(消息级):这【整条】消息是 skill 正文(用户通道 /<name> 注入的那条)时置为 skill 名。
+  // 用户通道无 tool_use、正文只能作 user 消息注入,故标在消息级;模型通道则标在 ToolResultBlock 上。
+  // 用途同 ToolResultBlock.skillMark:长期记忆抽取据此剔除。仅是元信息,不改 content、不发给 API、
+  // 落盘 JSON 往返即可(见 CONTEXT.md「skill 标记」、docs/adr/0014)。
+  skillMark?: string;
 }
 
 // ============ 冻结区重建（restoreFrozen）============

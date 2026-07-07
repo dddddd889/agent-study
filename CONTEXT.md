@@ -236,3 +236,33 @@ _Avoid_：解引用、还原、rehydrate（口语可，正式用「重放」）
 **附件标记（attachment marker）**：
 蒸馏历史成摘要时，附件块被替换成的**文字占位** `[图片 x.png]` / `[PDF x.pdf]`（与 [[历史保真]] 里 thinking 块被剔除同款）。绝不把 base64 喂给摘要器。冻结后原图不可见（只剩标记）是设计使然的**已知局限**——图的语义通常已在近期对话文本里。
 _Avoid_：占位符、缩略（那是别的）
+
+### Skill 能力
+
+**skill（技能）**：
+一个**按需加载、注入当前 agent 上下文、模型可自主选用**的指令/流程包。三条本质性质：① 渐进披露（启动只加载一句 `description` 菜单，正文调用时才读）；② 在**当前上下文**里执行、**不隔离**（区别于子 agent）；③ 模型可自主选用，也可用户手动触发（区别于纯用户触发的 slash 命令）。见 [ADR-0014](docs/adr/0014-skills-in-context-on-demand-instruction-packages.md)。
+_Avoid_：插件、命令、角色、流程（泛指时）——它们各有专指
+
+**SKILL.md**：
+一个 skill 的**唯一必需文件**，位于 `.claude/skills/<name>/SKILL.md`。目录式而非扁平文件，为将来捆绑资源留门。含 frontmatter（`description` 必填 / `disable-model-invocation` 可选）+ 正文（注入上下文的指令）。`name` **以目录名为准**（单一真相），frontmatter 不写。
+_Avoid_：技能文件、skill 配置
+
+**skill 菜单（skill menu）**：
+启动时扫两处目录（项目级 `<configDir>/skills/` + 用户级 `~/<configDir>/skills/`，`configDir` 默认 `.claude`、由 `AGENT_CONFIG_DIR` 覆盖以避开真 Claude Code；**同名项目覆盖用户**），**只解析 frontmatter** 得到的「name + description」一句话清单。注入 `skill` 工具的 description（吃提示词缓存前缀）。是渐进披露里那份廉价的菜单；正文不在此加载。`disable-model-invocation` 的 skill **不进菜单**（模型看不见，仍可 `/<name>` 手动调）。
+_Avoid_：skill 列表、注册表（那是 [[角色注册表]] 的叫法）
+
+**正文热、菜单冷（body-hot menu-cold）**：
+skill 的加载策略：**菜单**是启动时快照（冷，改需 `/skills reload`）；**正文**每次调用现读盘、不缓存（热，改即生效）。故改 skill 正文立即生效，只有增删 skill 或改 name/description 才需 reload。
+_Avoid_：热加载、缓存刷新（泛指时）
+
+**skill 工具 / `/<name>` 双通道（dual invocation channel）**：
+触发一个 skill 的两条路：**模型通道**=模型调 `skill(name, args?)` 工具（`skill` 非危险、计一步干活，对齐 [[dispatch_agent]]）；**用户通道**=用户敲 `/<name> args`（内置 slash 命令优先，撞名加载 warn）。两通道共用「定位目录 → 读正文 → 拼装（顶部 `Base directory:`、尾部 `ARGUMENTS:`）→ 打 skill 标记」，仅**载体随通道分**：模型通道正文回作 `tool_result`；用户通道无 tool_use，注入**两条**消息（用户原话不打标 + 正文打标）。
+_Avoid_：调用方式、触发器
+
+**skill 标记（skill mark）**：
+skill 正文注入消息上挂的元信息 `{skill:name}`，标出「这条是 skill 正文、非真实对话」。**只盖正文，不盖用户意图**（用户原话 / 模型 `tool_use` 不打标，其表达的意图照常沉淀）。用途：让**长期记忆抽取**把它剔掉。**绝不影响流水落盘**——skill 正文原样进 JSONL（流水是[[流水|唯一真相]]）。
+_Avoid_：skill flag、注入标记（泛指时）
+
+**skill 三层蒸馏处置（skill three-tier distill）**：
+skill 正文在三层里的不同命运：**会话流水（JSONL）**——原样保留，永远；**短期记忆（工作上下文）**——活跃期完整、老化时随[[摘要压缩]]**当普通内容正常摘要**；**长期记忆（`.memory.md`）**——**剔除**（不沉淀流程指令）。落地：`serializeForDistill` 加 `dropSkill` 参数——记忆抽取传 `true`（按 skill 标记剔）、摘要压缩传 `false`（保留），拆开原本共用的别名。
+_Avoid_：skill 过滤、记忆排除（泛指时）

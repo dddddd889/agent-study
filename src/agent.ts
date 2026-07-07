@@ -8,6 +8,7 @@ import {
   type PermissionMode,
   resolvePolicy,
 } from "./permission";
+import { SKILL_TOOL_NAME } from "./skills";
 import type {
   ContentBlock,
   LLM,
@@ -184,16 +185,30 @@ export class Agent {
   //   · 无 ref 块的消息原样返回(不复制),常态零开销。
   private rehydrate(messages: Message[]): Message[] {
     return messages.map((m) => {
-      if (typeof m.content === "string" || !m.content.some(isAttachmentRef)) {
-        return m;
+      // 字符串 content 常态零拷贝;仅当带消息级 skillMark(用户通道 skill 正文)时剥掉再上线
+      // ——不依赖 llm.ts 的 {role,content} 映射兜底,把「标记不上线」这条不变量钉在整备边界。
+      if (typeof m.content === "string") {
+        return m.skillMark ? { role: m.role, content: m.content } : m;
       }
+      const hasRef = m.content.some(isAttachmentRef);
+      // skill 标记(块级)绝不能上线:Anthropic 对 content block 字段严格,多余字段可能 400。
+      // 按「llm.ts 纯透传」的不变量(ADR-0013),在这个「喂 API 前整备」的边界剥掉它。
+      // (消息级 skillMark 已被 llm 的 {role,content} 映射天然丢弃,无需处理。)
+      const hasSkillMark = m.content.some((b) => b.type === "tool_result" && b.skillMark);
+      if (!hasRef && !hasSkillMark) return m; // 常态零拷贝
       const content: ContentBlock[] = m.content.map((b) => {
-        if (!isAttachmentRef(b)) return b;
-        const base64 = this.blobResolver?.(b.ref) ?? null;
-        if (base64 === null) {
-          return { type: "text", text: `[${attachmentLabel(b)} ${b.name}（已删除）]` };
+        if (isAttachmentRef(b)) {
+          const base64 = this.blobResolver?.(b.ref) ?? null;
+          if (base64 === null) {
+            return { type: "text", text: `[${attachmentLabel(b)} ${b.name}（已删除）]` };
+          }
+          return toWireBlock(b, base64);
         }
-        return toWireBlock(b, base64);
+        if (b.type === "tool_result" && b.skillMark) {
+          const { skillMark, ...rest } = b; // 剥掉标记再上线
+          return rest;
+        }
+        return b;
       });
       return { role: m.role, content };
     });
@@ -247,9 +262,15 @@ export class Agent {
   //   - 流式中中断 → 把已流出的半截文本留成 assistant 消息；
   //   - 工具执行中中断 → 给未完成的 tool_use 补一条 is_error 取消结果。
   // 然后把这条(合法的)轮保留进历史 + 触发 onTurnComplete 落盘，再抛出中断错误。
+  //
+  // 用户通道 skill(第30步):
+  //   · opts.prelude —— 在本轮 input 之前先提交的消息(用户敲的原始 /<name> 原话)。
+  //     它【不打标】,照常沉淀进长期记忆(保住用户意图);input 本身是 skill 正文、由 skillMark 打标。
+  //   · opts.skillMark —— 给 input 这条 user 消息打 {skillMark},供长期记忆抽取剔除(见 docs/adr/0014)。
+  //   两条消息都是 user 角色、连续 —— Anthropic API 允许并合并为一轮(见 CONTEXT.md「双通道」)。
   async send(
     input: string | ContentBlock[],
-    opts: { signal?: AbortSignal } = {},
+    opts: { signal?: AbortSignal; prelude?: Message[]; skillMark?: string } = {},
   ): Promise<string> {
     const { signal } = opts;
 
@@ -259,9 +280,15 @@ export class Agent {
       this.history.push(m);
       added.push(m);
     };
+    // 用户通道 skill:先提交原话(不打标,进记忆),再提交 skill 正文(下面打标)。
+    for (const m of opts.prelude ?? []) commit(m);
     // 传字符串=纯文本轮;传块数组=带附件轮(text 块 + ref 块,由 CLI 拼好)。历史里存 ref 块,
-    // base64 只在下面 rehydrate 时临时拼出。
-    commit({ role: "user", content: input });
+    // base64 只在下面 rehydrate 时临时拼出。skillMark 存在则给这条打标(用户通道的 skill 正文)。
+    commit(
+      opts.skillMark
+        ? { role: "user", content: input, skillMark: opts.skillMark }
+        : { role: "user", content: input },
+    );
 
     // 跟踪当前阶段，供中断封口判断该补什么。
     let partialText = ""; // 流式阶段已流出的文本
@@ -547,7 +574,19 @@ export class Agent {
 
     const { content, isError } = await this.runTool(call, signal);
     this.onToolResult?.({ name: call.name, content, isError });
-    return { type: "tool_result", tool_use_id: call.id, content, is_error: isError };
+    const result: ToolResultBlock = {
+      type: "tool_result",
+      tool_use_id: call.id,
+      content,
+      is_error: isError,
+    };
+    // skill 正文回来了(模型通道):给这条结果块打【块级】标记 {skillMark: skill 名},
+    // 供长期记忆抽取剔除(见 context.serializeForDistill 的 dropSkill、docs/adr/0014)。
+    // 只标成功的正文;出错(未知 skill)无正文可剔,不标。块级是为了同轮批量收集时不误伤别的结果。
+    if (call.name === SKILL_TOOL_NAME && !isError) {
+      result.skillMark = String(call.input.name ?? "");
+    }
+    return result;
   }
 
   // 从内容块里抽取纯文本并拼接，作为最终回复字符串。

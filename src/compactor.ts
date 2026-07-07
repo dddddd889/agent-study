@@ -55,9 +55,13 @@ export interface CompactorOptions {
   mergeZoneRatio?: number;
 }
 
-// 摘要/合并那次 LLM 调用的输入序列化 = 通用蒸馏(剔思考 + 附件转文字标记),与长期记忆抽取共用
-// context.serializeForDistill(收口一处避免漂移)。摘要要的是状态/结论,不是推演过程;不影响思考保真。
-const serializeForSummary = serializeForDistill;
+// 摘要/合并那次 LLM 调用的输入序列化 = 通用蒸馏(剔思考 + 附件转文字标记)。摘要要的是状态/结论,
+// 不是推演过程;不影响思考保真。
+// 【与长期记忆抽取刻意分叉】(第30步):这里传 dropSkill:false —— skill 正文当普通内容照摘、
+// 在短期记忆里保留(随压缩窗口正常老化);而 memory.ts 传 true 把 skill 正文剔出长期记忆。
+// 两者对 skill 的诉求本就不同,故不再是原先「收口一处」的共用别名。见 CONTEXT.md「三层蒸馏处置」。
+const serializeForSummary = (messages: Message[]): string =>
+  serializeForDistill(messages, { dropSkill: false });
 
 // 上下文压缩器(见 docs/28、ADR-0012)：把「历史太长了帮我压一下」这件事收成深模块。
 // 窄接口 compact() 藏三策略(增量冻结 / 合并 / 截断兜底)+ 游标数学。无状态:Agent 持 history

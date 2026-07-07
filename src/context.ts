@@ -13,6 +13,10 @@ import type { ContentBlock, Message } from "./types";
 // 误判成非起点,导致压缩找不到切点/轮数漏计,故改用「排除 tool_result」这个更稳的判据。
 export function isUserInput(m: Message): boolean {
   if (m.role !== "user") return false;
+  // skill 正文(用户通道注入、带 skillMark)不是真实用户输入 —— 它和前面那条【原话】(不打标)
+  // 同属一轮。若把它也算轮起点,连续两条 user 消息会让轮数虚涨、还可能把原话和正文切到两轮
+  // (第30步)。故排除;原话(无 skillMark)照常是轮起点。
+  if (m.skillMark) return false;
   if (typeof m.content === "string") return true;
   return !m.content.some((b) => b.type === "tool_result");
 }
@@ -48,26 +52,46 @@ function attachmentTokens(m: Message): number {
 //   · 附件 ref 块 → 文字标记 [图片 x.png]——蒸馏器是纯文本调用、看不见图,且绝不该把附件塞进去;
 //     图的语义通常已在近期对话文本里,标记只需标出「曾有图」。
 // 只改蒸馏【输入】的序列化:history 里的思考块 / ref 块一字不动(主循环回放仍原样保真)。
-export function serializeForDistill(messages: Message[]): string {
-  return messages
-    .map((m) => {
-      if (typeof m.content === "string") return `${m.role}: ${m.content}`;
-      const kept: ContentBlock[] = [];
-      const markers: string[] = [];
-      for (const b of m.content) {
-        if (b.type === "thinking" || b.type === "redacted_thinking") continue;
-        if (isAttachmentRef(b)) {
-          markers.push(`[${attachmentLabel(b)} ${b.name}]`);
-          continue;
-        }
-        kept.push(b);
+//
+// dropSkill(第30步,skill 三层蒸馏):是否剔掉 skill 正文(带 skillMark 的消息/tool_result 块)。
+//   · 长期记忆抽取传 true —— skill 是【流程指令】,沉淀进 .memory.md 是污染、且反过来废掉渐进披露。
+//   · 摘要压缩传 false —— skill 正文当普通内容照摘(短期记忆里保留,老化随窗口正常压掉)。
+// 这拆开了 memory 与 compactor 原本共用的别名(docs/adr/0013),是一处刻意的分叉:两者对 skill
+// 正文的诉求本就不同(记忆别沉淀流程 / 压缩照常压)。见 CONTEXT.md「三层蒸馏处置」、docs/adr/0014。
+// 标记【只盖 skill 正文,不盖意图】:同轮的用户原话 / 模型 tool_use(无 skillMark)照常保留。
+export function serializeForDistill(
+  messages: Message[],
+  opts: { dropSkill?: boolean } = {},
+): string {
+  const lines: string[] = [];
+  for (const m of messages) {
+    // 用户通道注入的 skill 正文(整条消息带 skillMark):dropSkill 时整条剔除。
+    if (opts.dropSkill && m.skillMark) continue;
+    if (typeof m.content === "string") {
+      lines.push(`${m.role}: ${m.content}`);
+      continue;
+    }
+    const kept: ContentBlock[] = [];
+    const markers: string[] = [];
+    for (const b of m.content) {
+      if (b.type === "thinking" || b.type === "redacted_thinking") continue;
+      // 模型通道的 skill 正文(块级 skillMark 的 tool_result):dropSkill 时只剔这一块,
+      // 不误伤同轮批量收集进同一条消息的别的工具结果。
+      if (opts.dropSkill && b.type === "tool_result" && b.skillMark) continue;
+      if (isAttachmentRef(b)) {
+        markers.push(`[${attachmentLabel(b)} ${b.name}]`);
+        continue;
       }
-      const parts: string[] = [];
-      if (kept.length > 0) parts.push(JSON.stringify(kept));
-      parts.push(...markers);
-      return `${m.role}: ${parts.join(" ")}`;
-    })
-    .join("\n");
+      kept.push(b);
+    }
+    // 整条都被剔空(如只含一块 skill 正文的 tool_result 消息)→ 不产出空行。
+    if (kept.length === 0 && markers.length === 0) continue;
+    const parts: string[] = [];
+    if (kept.length > 0) parts.push(JSON.stringify(kept));
+    parts.push(...markers);
+    lines.push(`${m.role}: ${parts.join(" ")}`);
+  }
+  return lines.join("\n");
 }
 
 function estimateText(s: string): number {

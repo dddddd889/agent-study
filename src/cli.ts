@@ -17,13 +17,19 @@ import {
   writeSummary,
 } from "./session";
 import {
+  createSkillTool,
+  loadSkillBody,
+  scanSkills,
+  type SkillMeta,
+} from "./skills";
+import {
   createCriticTool,
   createDispatchAgentTool,
   DISPATCH_TOOL_NAME,
 } from "./subagent";
 import { latestTodos, renderTodos } from "./todo";
 import { defaultTools } from "./tools";
-import type { ContentBlock, Tool, Usage } from "./types";
+import type { ContentBlock, Message, Tool, Usage } from "./types";
 
 // 子 agent 显示配色(第16步):每个【新出现】的子 agent 按顺序分到下一个调色板颜色,
 // 保证同时出现的多个子 agent 颜色互不相同(超过调色板数量才回卷);同一 id 本会话内恒定同色。
@@ -245,10 +251,35 @@ async function main() {
   const getSessionId = () => sessionId;
   let dispatchTool: Tool;
   let criticTool: Tool;
+
+  // Skill(第30步):启动扫两处目录建菜单(冷),正文调用时现读(热)。见 docs/adr/0014。
+  // 内置命令名集合 —— /<name> 分发时内置优先;skill 撞名则遮蔽其用户入口(加载 warn)。
+  const BUILTIN_COMMANDS = new Set([
+    "exit", "reset", "sessions", "new", "context",
+    "memory", "todo", "agents", "mode", "mcp", "skills",
+  ]);
+  let skills: SkillMeta[] = [];
+  let skillTool: Tool | null = null;
+  // 重扫目录、重建 skill 工具,返回本次的告警(加载软失败 + 撞名内置)。CLI 决定怎么显示。
+  const reloadSkills = (): string[] => {
+    const res = scanSkills();
+    skills = res.skills;
+    skillTool = createSkillTool(skills);
+    const warns = [...res.warnings];
+    for (const s of skills) {
+      if (BUILTIN_COMMANDS.has(s.name)) {
+        warns.push(`skill "${s.name}" 与内置命令同名，其 /${s.name} 用户入口被遮蔽（模型仍可调用）`);
+      }
+    }
+    return warns;
+  };
+  const skillWarns = reloadSkills(); // 启动扫一次(在建 agent 前,好让工具集含 skill)
+
   const currentTools = (): Tool[] => [
     ...defaultTools,
     dispatchTool,
     criticTool,
+    ...(skillTool ? [skillTool] : []), // 有可模型调用 skill 才挂(见 createSkillTool)
     ...mcp.tools,
   ];
   // dispatch_agent 与 critic 共享同一套依赖(取工具集 / 会话 id / 审批 / 显示回调)。
@@ -389,8 +420,10 @@ async function main() {
   }
 
   console.log(
-    "命令：/exit · /reset · /sessions · /new · /context · /memory · /todo · /agents · /mode · /mcp [reload]",
+    "命令：/exit · /reset · /sessions · /new · /context · /memory · /todo · /agents · /mode · /mcp [reload] · /skills [reload]",
   );
+  // 启动时的 skill 加载告警(坏 skill 跳过 / 撞名内置)。
+  for (const w of skillWarns) console.log(`  ⚠ ${w}`);
 
   // 提示符已可立即出现;MCP 在后台连(连好再打印就绪概况、再可用)。
   if (mcpConfigured) console.log("· MCP 连接中…(后台)");
@@ -520,16 +553,71 @@ async function main() {
       console.log("");
       continue;
     }
+    if (text === "/skills") {
+      // 列出【全部】skill(含 disabled,标注);正文热、菜单冷。
+      if (!skills.length) {
+        console.log("（无 skill；在 <configDir>/skills/<name>/SKILL.md 或 ~/<configDir>/skills/ 放一个后用 /skills reload 加载。configDir 默认 .claude，可用 AGENT_CONFIG_DIR 覆盖）\n");
+      } else {
+        for (const s of skills) {
+          const flag = s.disableModelInvocation ? " [仅手动]" : "";
+          console.log(`  /${s.name}  (${s.source})${flag}  ${s.description}`);
+        }
+        console.log("\n（调用：/<name> [参数]；模型也会在合适时自动调用未标[仅手动]的）\n");
+      }
+      continue;
+    }
+    if (text === "/skills reload") {
+      const warns = reloadSkills();
+      agent.setTools(currentTools()); // 运行时换工具集(刷新 skill 菜单)
+      console.log(`已重载 skill（${skills.length} 个）`);
+      for (const w of warns) console.log(`  ⚠ ${w}`);
+      console.log("");
+      continue;
+    }
     if (text === "") continue;
 
-    // 附件:把输入里的 @路径 拎成 ref 块落进会话 blob 仓;无附件则原样是字符串。
-    const { content: sendContent, notes } = parseAttachments(text, blobDir(sessionId));
-    for (const n of notes) console.log(n);
+    // 决定这一轮怎么发:未匹配内置命令的 /<name> 走 skill 用户通道;否则普通输入。
+    let sendContent: string | ContentBlock[];
+    let sendOpts: { signal: AbortSignal; prelude?: Message[]; skillMark?: string };
+    const abort = new AbortController();
+    if (text.startsWith("/")) {
+      // 内置命令已在上面全部拦截;走到这里的 /命令 只可能是 skill 或未知。
+      const sp = text.indexOf(" ");
+      const name = sp === -1 ? text.slice(1) : text.slice(1, sp);
+      const args = sp === -1 ? "" : text.slice(sp + 1).trim();
+      const meta = skills.find((s) => s.name === name);
+      if (!meta) {
+        console.log(`未知命令/skill：/${name}\n`);
+        continue;
+      }
+      // 用户通道:注入两条消息 —— 原话(不打标,进记忆) + skill 正文(打标,剔长期记忆)。
+      // loadSkillBody 现读盘,可能在 reload 后、调用前文件被删 → 软失败(与模型通道 runTool 捕获对称),
+      // 别让 ENOENT 穿透 readline 主循环崩掉进程。
+      let body: string;
+      try {
+        body = loadSkillBody(meta, args || undefined);
+      } catch (err) {
+        console.log(`skill /${name} 读取失败：${(err as Error).message}\n`);
+        continue;
+      }
+      sendContent = body;
+      sendOpts = {
+        signal: abort.signal,
+        prelude: [{ role: "user", content: text }],
+        skillMark: meta.name,
+      };
+    } else {
+      // 附件:把输入里的 @路径 拎成 ref 块落进会话 blob 仓;无附件则原样是字符串。
+      const { content, notes } = parseAttachments(text, blobDir(sessionId));
+      for (const n of notes) console.log(n);
+      sendContent = content;
+      sendOpts = { signal: abort.signal };
+    }
 
-    currentAbort = new AbortController();
+    currentAbort = abort;
     try {
       process.stdout.write("\nAI > ");
-      const reply = await agent.send(sendContent, { signal: currentAbort.signal });
+      const reply = await agent.send(sendContent, sendOpts);
       process.stdout.write("\n");
       if (reply.trim() === "") {
         console.log("(本轮无文本输出，可能是工具失败后模型未给结论)");

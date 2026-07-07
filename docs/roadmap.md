@@ -13,7 +13,7 @@
 | 指令注入 `AGENTS.md` / `CLAUDE.md` | 🚧 | 启动读项目根指令注入 system。已有 `.memory.md` 注入管线，近乎白送 |
 | 自定义 slash 命令 `.claude/commands/*.md` | 🚧 | 放个 md 就多一条命令（对标 CC） |
 | 自定义角色 `.claude/agents/*.md` | 🚧 | 从文件加载子 agent 角色，接第 18 步角色注册表 |
-| Skills（可加载技能包） | 🚧 | 可插拔的技能/流程包 |
+| Skills（可加载技能包） | ✅ 30 | `.claude/skills/<name>/SKILL.md`（项目级+用户级）/ 渐进披露 / `skill` 工具 + `/<name>` 双通道 / `/skills [reload]`。见 docs/adr/0014 |
 
 ## 编辑 / 代码能力
 

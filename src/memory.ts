@@ -35,8 +35,9 @@ export async function extractMemory(
   current: string,
 ): Promise<{ memory: string; usage?: Usage }> {
   // 蒸馏成文本喂给抽取:剔除思考块(草稿+签名,沉淀进记忆是污染+烧 token)、附件 ref 块转文字标记
-  // (记忆是纯文本、看不见图,第29步)。与摘要压缩共用同一套规则,见 context.serializeForDistill。
-  const transcript = serializeForDistill(history);
+  // (记忆是纯文本、看不见图,第29步)、【剔除 skill 正文】(dropSkill:true——skill 是流程指令,
+  // 不该沉淀进长期记忆,第30步)。见 context.serializeForDistill、CONTEXT.md「三层蒸馏处置」。
+  const transcript = serializeForDistill(history, { dropSkill: true });
   const prompt =
     `已有长期记忆：\n${current || "(空)"}\n\n` +
     `本次对话：\n${transcript}\n\n` +
