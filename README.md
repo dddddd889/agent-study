@@ -182,6 +182,21 @@ bun run typecheck
 
 调试时用 **变量(Variables)** 面板看 `this.history`、用 **调试控制台(Debug Console)** 直接求值，比 `console.log` 高效。
 
+### 命令行断点调试（`--inspect-wait`）
+
+不想走 VSCode 的 F5，也可以直接用 Bun 自带的 inspector：
+
+```bash
+# 从【项目根目录】跑；--inspect-wait 会挂起、等调试器接入后再执行
+AGENT_CONFIG_DIR=.agent AGENT_THINKING=1 AGENT_MAX_CONTEXT_TOKENS=200 \
+  bun --inspect-wait=ws://localhost:6499/cli run src/cli.ts
+```
+
+- `--inspect-wait=ws://localhost:6499/cli`：在 6499 端口开 WebSocket inspector，并**等调试器连上再开始执行**（换成 `--inspect` 则不等待）。用 Chrome DevTools（`chrome://inspect` → Configure 加 `localhost:6499`）或 VSCode 的 **Attach** 接到 `ws://localhost:6499/cli`。
+- 前面几个环境变量按需搭配：`AGENT_CONFIG_DIR=.agent` 从 `.agent/skills` 加载 skill；`AGENT_THINKING=1` 开扩展思考；`AGENT_MAX_CONTEXT_TOKENS=200` 调到极小，方便观察摘要压缩触发。
+
+> ⚠️ **别用 `--cwd=./tmp/` 之类改工作目录来跑**：skill 目录（以及 `.sessions/`、`.memory.md`、`.mcp.json`）都按**相对进程工作目录**解析。`--cwd=./tmp/` 会把项目级 skill 目录算成 `tmp/.agent/skills/`，于是扫不到根目录的 `.agent/skills`（这正是"扫不到 skill"的原因）。要在别处跑，就用绝对路径覆盖：`AGENT_SKILLS_DIR=/abs/path/.agent/skills`。
+
 ### 想看真实请求长什么样
 
 在 `src/llm.ts` 的 `fetch` 前后加日志即可：
